@@ -33,8 +33,11 @@ module async_fifo #(
     input  wire                  cfg_clk,
     input  wire                  cfg_rst_n,
     input  wire                  cfg_we,
-    input  wire [1:0]            cfg_addr,   // 0: AE, 1: AF, 2: active depth
+    input  wire                  cfg_re,
+    input  wire [3:0]            cfg_addr,
     input  wire [ADDR_W:0]       cfg_wdata,
+    output logic [ADDR_W:0]       cfg_rdata,
+    output wire                  irq,
     output wire                  almost_empty,
     output wire                  almost_full,
 
@@ -73,6 +76,25 @@ module async_fifo #(
   logic [PTR_W-1:0] ae_threshold, af_threshold;
   (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] depth_gray_sync1, depth_gray_sync2;
   logic [PTR_W-1:0] active_depth;
+  logic [3:0] irq_mask;
+  logic overflow_sticky, underflow_sticky;
+  logic [1:0] overflow_cfg_sync, underflow_cfg_sync;
+  logic overflow_clear_toggle, underflow_clear_toggle;
+  logic [1:0] overflow_clear_sync, underflow_clear_sync;
+  logic overflow_clear_seen, underflow_clear_seen;
+  logic flush_req_toggle;
+  logic [1:0] flush_wr_sync, flush_rd_sync;
+  logic flush_wr_seen, flush_rd_seen;
+  logic [1:0] flush_wr_ack_sync, flush_rd_ack_sync;
+  wire flush_busy = (flush_wr_ack_sync[1] != flush_req_toggle) ||
+                    (flush_rd_ack_sync[1] != flush_req_toggle);
+  (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] wr_ptr_cfg_sync1, wr_ptr_cfg_sync2;
+  (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] rd_ptr_cfg_sync1, rd_ptr_cfg_sync2;
+  (* ASYNC_REG = "TRUE" *) logic [1:0] full_cfg_sync, empty_cfg_sync;
+  (* ASYNC_REG = "TRUE" *) logic [1:0] af_cfg_sync, ae_cfg_sync;
+  wire [3:0] irq_status = {ae_cfg_sync[1], af_cfg_sync[1],
+                           empty_cfg_sync[1], full_cfg_sync[1]};
+  assign irq = |(irq_status & irq_mask);
 
   function automatic logic [PTR_W-1:0] bin_to_gray(input logic [PTR_W-1:0] bin);
     return bin ^ (bin >> 1);
@@ -91,11 +113,15 @@ module async_fifo #(
       ae_cfg_gray <= bin_to_gray(AE_DEFAULT);
       af_cfg_gray <= bin_to_gray(AF_DEFAULT);
       depth_cfg_gray <= bin_to_gray(DEPTH_VALUE);
+      irq_mask <= '0;
+      overflow_clear_toggle <= 1'b0;
+      underflow_clear_toggle <= 1'b0;
+      flush_req_toggle <= 1'b0;
     end else if (cfg_we) begin
       case (cfg_addr)
-        2'd0: ae_cfg_gray <= bin_to_gray((cfg_wdata > DEPTH_VALUE) ? DEPTH_VALUE : cfg_wdata);
-        2'd1: af_cfg_gray <= bin_to_gray((cfg_wdata > DEPTH_VALUE) ? DEPTH_VALUE : cfg_wdata);
-        2'd2: begin
+        4'd0: ae_cfg_gray <= bin_to_gray((cfg_wdata > DEPTH_VALUE) ? DEPTH_VALUE : cfg_wdata);
+        4'd1: af_cfg_gray <= bin_to_gray((cfg_wdata > DEPTH_VALUE) ? DEPTH_VALUE : cfg_wdata);
+        4'd2: begin
           case (cfg_wdata[1:0])
             2'd0: depth_cfg_gray <= bin_to_gray(DEPTH_VALUE);
             2'd1: depth_cfg_gray <= bin_to_gray(PTR_W'((DEPTH * 3) / 4));
@@ -103,7 +129,62 @@ module async_fifo #(
             2'd3: depth_cfg_gray <= bin_to_gray(PTR_W'(DEPTH / 4));
           endcase
         end
+        4'd3: irq_mask <= cfg_wdata[3:0];
+        4'd5: begin
+          if (cfg_wdata[0]) overflow_clear_toggle <= ~overflow_clear_toggle;
+          if (cfg_wdata[1]) underflow_clear_toggle <= ~underflow_clear_toggle;
+        end
+        4'd8: if (cfg_wdata[0] && !flush_busy)
+                flush_req_toggle <= ~flush_req_toggle;
         default: ;
+      endcase
+    end
+  end
+
+  always_ff @(posedge cfg_clk or negedge cfg_rst_n) begin
+    if (!cfg_rst_n) begin
+      full_cfg_sync  <= '0;
+      empty_cfg_sync <= '0;
+      af_cfg_sync    <= '0;
+      ae_cfg_sync    <= '0;
+      overflow_cfg_sync <= '0;
+      underflow_cfg_sync <= '0;
+      wr_ptr_cfg_sync1 <= '0;
+      wr_ptr_cfg_sync2 <= '0;
+      rd_ptr_cfg_sync1 <= '0;
+      rd_ptr_cfg_sync2 <= '0;
+      flush_wr_ack_sync <= '0;
+      flush_rd_ack_sync <= '0;
+    end else begin
+      full_cfg_sync  <= {full_cfg_sync[0], full};
+      empty_cfg_sync <= {empty_cfg_sync[0], empty};
+      af_cfg_sync    <= {af_cfg_sync[0], almost_full};
+      ae_cfg_sync    <= {ae_cfg_sync[0], almost_empty};
+      overflow_cfg_sync <= {overflow_cfg_sync[0], overflow_sticky};
+      underflow_cfg_sync <= {underflow_cfg_sync[0], underflow_sticky};
+      wr_ptr_cfg_sync1 <= wr_ptr_gray;
+      wr_ptr_cfg_sync2 <= wr_ptr_cfg_sync1;
+      rd_ptr_cfg_sync1 <= rd_ptr_gray;
+      rd_ptr_cfg_sync2 <= rd_ptr_cfg_sync1;
+      flush_wr_ack_sync <= {flush_wr_ack_sync[0], flush_wr_seen};
+      flush_rd_ack_sync <= {flush_rd_ack_sync[0], flush_rd_seen};
+    end
+  end
+
+  always @* begin
+    cfg_rdata = '0;
+    if (cfg_re) begin
+      case (cfg_addr)
+        4'd0: cfg_rdata = gray_to_bin(ae_cfg_gray);
+        4'd1: cfg_rdata = gray_to_bin(af_cfg_gray);
+        4'd2: cfg_rdata = active_depth;
+        4'd3: cfg_rdata = PTR_W'(irq_mask);
+        4'd4: cfg_rdata = PTR_W'(irq_status);
+        4'd5: cfg_rdata = PTR_W'({underflow_cfg_sync[1], overflow_cfg_sync[1]});
+        4'd6: cfg_rdata = gray_to_bin(wr_ptr_cfg_sync2) - gray_to_bin(rd_ptr_cfg_sync2);
+        4'd7: cfg_rdata = gray_to_bin(wr_ptr_cfg_sync2) - gray_to_bin(rd_ptr_cfg_sync2);
+        4'd8: cfg_rdata = PTR_W'(flush_busy);
+        default: cfg_rdata = '0;
       endcase
     end
   end
@@ -160,8 +241,38 @@ module async_fifo #(
   // Internal write/read enables (gated by full/empty)
   logic do_write, do_read;
 
-  assign do_write = wr_reset_n && wr_en && !full;
-  assign do_read  = rd_reset_n && rd_en && !empty;
+  assign do_write = wr_reset_n && wr_en && !full &&
+                    (flush_wr_sync[1] == flush_wr_seen);
+  assign do_read  = rd_reset_n && rd_en && !empty &&
+                    (flush_rd_sync[1] == flush_rd_seen);
+
+  // Sticky access errors. W1C requests cross back as toggles, preventing a
+  // narrow cfg_clk pulse from being missed by either asynchronous domain.
+  always_ff @(posedge wr_clk or negedge wr_reset_n) begin
+    if (!wr_reset_n) begin
+      overflow_clear_sync <= '0;
+      overflow_clear_seen <= 1'b0;
+      overflow_sticky <= 1'b0;
+    end else begin
+      overflow_clear_sync <= {overflow_clear_sync[0], overflow_clear_toggle};
+      overflow_clear_seen <= overflow_clear_sync[1];
+      if (overflow_clear_sync[1] != overflow_clear_seen) overflow_sticky <= 1'b0;
+      if (wr_en && full) overflow_sticky <= 1'b1;
+    end
+  end
+
+  always_ff @(posedge rd_clk or negedge rd_reset_n) begin
+    if (!rd_reset_n) begin
+      underflow_clear_sync <= '0;
+      underflow_clear_seen <= 1'b0;
+      underflow_sticky <= 1'b0;
+    end else begin
+      underflow_clear_sync <= {underflow_clear_sync[0], underflow_clear_toggle};
+      underflow_clear_seen <= underflow_clear_sync[1];
+      if (underflow_clear_sync[1] != underflow_clear_seen) underflow_sticky <= 1'b0;
+      if (rd_en && empty) underflow_sticky <= 1'b1;
+    end
+  end
 
   // =========================================================================
   // WRITE DOMAIN
@@ -178,9 +289,18 @@ module async_fifo #(
     if (!wr_reset_n) begin
       wr_ptr_bin  <= '0;
       wr_ptr_gray <= '0;
+      flush_wr_sync <= '0;
+      flush_wr_seen <= 1'b0;
     end else begin
-      wr_ptr_bin  <= wr_ptr_bin_next;
-      wr_ptr_gray <= wr_ptr_gray_next;
+      flush_wr_sync <= {flush_wr_sync[0], flush_req_toggle};
+      if (flush_wr_sync[1] != flush_wr_seen) begin
+        wr_ptr_bin <= '0;
+        wr_ptr_gray <= '0;
+        flush_wr_seen <= flush_wr_sync[1];
+      end else begin
+        wr_ptr_bin  <= wr_ptr_bin_next;
+        wr_ptr_gray <= wr_ptr_gray_next;
+      end
     end
   end
 
@@ -227,9 +347,18 @@ module async_fifo #(
     if (!rd_reset_n) begin
       rd_ptr_bin  <= '0;
       rd_ptr_gray <= '0;
+      flush_rd_sync <= '0;
+      flush_rd_seen <= 1'b0;
     end else begin
-      rd_ptr_bin  <= rd_ptr_bin_next;
-      rd_ptr_gray <= rd_ptr_gray_next;
+      flush_rd_sync <= {flush_rd_sync[0], flush_req_toggle};
+      if (flush_rd_sync[1] != flush_rd_seen) begin
+        rd_ptr_bin <= '0;
+        rd_ptr_gray <= '0;
+        flush_rd_seen <= flush_rd_sync[1];
+      end else begin
+        rd_ptr_bin  <= rd_ptr_bin_next;
+        rd_ptr_gray <= rd_ptr_gray_next;
+      end
     end
   end
 

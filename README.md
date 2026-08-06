@@ -11,6 +11,10 @@ Synthesizable SystemVerilog asynchronous FIFO with independent write/read clocks
 - Programmable `almost_empty` and `almost_full`
 - Runtime active depth: 100%, 75%, 50%, or 25% of `DEPTH`
 - Gray-encoded configuration CDC
+- Maskable level interrupt for full, empty, almost-full, and almost-empty
+- Sticky overflow/underflow status with write-one-to-clear
+- Configuration and approximate occupancy readback
+- Cross-domain flush command with busy handshake
 - Directed, randomized, boundary, and coverage tests
 
 ## Quick Start
@@ -60,19 +64,31 @@ Latest verified results (`DW=8`, `DEPTH=16`):
 | `cfg_clk` | I | config | Configuration clock |
 | `cfg_rst_n` | I | config | Active-low configuration reset |
 | `cfg_we` | I | config | Configuration write enable |
-| `cfg_addr[1:0]` | I | config | Register address |
+| `cfg_re` | I | config | Configuration read enable; gates `cfg_rdata` |
+| `cfg_addr[3:0]` | I | config | Register address |
 | `cfg_wdata[ADDR_W:0]` | I | config | Register write data |
+| `cfg_rdata[ADDR_W:0]` | O | config | Combinational register read data; zero when `cfg_re=0` |
+| `irq` | O | config | OR of enabled interrupt status bits |
 | `wr_ptr_gray_sync[ADDR_W:0]` | O | read | Write pointer synchronized into read domain |
 | `rd_ptr_gray_sync[ADDR_W:0]` | O | write | Read pointer synchronized into write domain |
 
 ## Configuration Registers
 
-| `cfg_addr` | Register | Reset | Write value |
-|---:|---|---:|---|
-| `0` | Almost-empty threshold | `ceil(20% × DEPTH)` | Entry count; values above `DEPTH` saturate |
-| `1` | Almost-full threshold | `ceil(80% × DEPTH)` | Entry count; values above `DEPTH` saturate |
-| `2` | Active depth | 100% | `cfg_wdata[1:0]`: `0`=100%, `1`=75%, `2`=50%, `3`=25% |
-| `3` | Reserved | — | Ignored |
+| Address | Register | Access | Reset | Data |
+|---:|---|---|---:|---|
+| `0` | Almost-empty threshold | R/W | `ceil(20% × DEPTH)` | Entry count; writes above `DEPTH` saturate |
+| `1` | Almost-full threshold | R/W | `ceil(80% × DEPTH)` | Entry count; writes above `DEPTH` saturate |
+| `2` | Active depth | R/W | `DEPTH` | Write selector `[1:0]`: `0`=100%, `1`=75%, `2`=50%, `3`=25%; read returns entry count |
+| `3` | IRQ mask | R/W | `0` | `[0]` full, `[1]` empty, `[2]` almost-full, `[3]` almost-empty; `1` enables source |
+| `4` | IRQ status | R | dynamic | Bit assignment matches IRQ mask |
+| `5` | Sticky errors | R/W1C | `0` | `[0]` overflow, `[1]` underflow; write `1` to clear corresponding bit |
+| `6` | Write occupancy | R | `0` | Approximate entry count sampled in `cfg_clk` |
+| `7` | Read occupancy | R | `0` | Approximate entry count sampled in `cfg_clk` |
+| `8` | Flush control/status | R/W | `0` | Write `[0]=1` to request flush; read `[0]` as busy |
+
+`irq = |(irq_status & irq_mask)`. Status sources are synchronized levels, so assertion/deassertion has CDC latency. Sticky errors do not currently feed `irq`.
+
+Flush resets both data-domain pointers through a request/acknowledge toggle handshake. Access is blocked while each domain accepts the request. Do not issue another flush while busy; such writes are ignored. FIFO memory is not erased, but flushed entries become inaccessible.
 
 Change active depth only while the FIFO is empty. Software must ensure the almost-full threshold is sensible for the selected active depth.
 
@@ -96,7 +112,7 @@ doc/design.md           Design and integration details
 ## Notes
 
 - `rd_data` updates on an accepted read clock edge.
-- Status uses synchronized remote pointers; cross-domain occupancy is intentionally approximate by synchronizer latency.
+- Status and occupancy use synchronized pointers/signals; readback is intentionally approximate by synchronizer latency.
 - Apply CDC timing constraints and preserve `ASYNC_REG` chains in implementation.
 - No license file currently exists; add one before redistribution if required.
 

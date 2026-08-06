@@ -37,9 +37,9 @@ module tb_async_fifo;
   logic                  wr_en, rd_en;
   logic  [DW-1:0]        wr_data, rd_data;
   logic                  full, empty;
-  logic                  cfg_we, almost_empty, almost_full;
-  logic [1:0]            cfg_addr;
-  logic [ADDR_W:0]       cfg_wdata;
+  logic                  cfg_we, cfg_re, irq, almost_empty, almost_full;
+  logic [3:0]            cfg_addr;
+  logic [ADDR_W:0]       cfg_wdata, cfg_rdata;
   logic [ADDR_W:0]       wr_ptr_gray_sync, rd_ptr_gray_sync;
 
   // --- DUT ---
@@ -60,8 +60,11 @@ module tb_async_fifo;
     .cfg_clk          (wr_clk),
     .cfg_rst_n        (wr_rst_n),
     .cfg_we           (cfg_we),
+    .cfg_re           (cfg_re),
     .cfg_addr         (cfg_addr),
     .cfg_wdata        (cfg_wdata),
+    .cfg_rdata        (cfg_rdata),
+    .irq              (irq),
     .almost_empty     (almost_empty),
     .almost_full      (almost_full),
     .wr_ptr_gray_sync (),
@@ -104,6 +107,7 @@ module tb_async_fifo;
       rd_en    = 0;
       wr_data  = 0;
       cfg_we    = 0;
+      cfg_re    = 0;
       cfg_addr  = 0;
       cfg_wdata = 0;
       ref_mem.delete();
@@ -119,7 +123,7 @@ module tb_async_fifo;
     end
   endtask
 
-  task automatic cfg_write(input logic [1:0] addr,
+  task automatic cfg_write(input logic [3:0] addr,
                            input logic [ADDR_W:0] data);
     begin
       @(negedge wr_clk);
@@ -130,6 +134,154 @@ module tb_async_fifo;
       cfg_we = 0;
       repeat (4) @(posedge wr_clk);
       repeat (4) @(posedge rd_clk);
+    end
+  endtask
+
+  task automatic cfg_read(input logic [3:0] addr,
+                          output logic [ADDR_W:0] data);
+    begin
+      @(negedge wr_clk);
+      cfg_addr = addr;
+      cfg_re = 1;
+      #1 data = cfg_rdata;
+      @(negedge wr_clk);
+      cfg_re = 0;
+    end
+  endtask
+
+  task automatic test_irq_mask_status;
+    logic [ADDR_W:0] data;
+    int i;
+    begin
+      $display("=== Interrupt status and mask ===");
+      do_reset;
+      cfg_write(3, 4'b0001); // full only
+      cfg_read(3, data);
+      if (data[3:0] != 4'b0001) begin $error("FAIL: IRQ mask readback"); errors++; end
+      for (i = 0; i < DEPTH; i++) do_write(DW'(i));
+      repeat (3) @(posedge wr_clk);
+      cfg_read(4, data);
+      if (!data[0] || !irq) begin $error("FAIL: full IRQ/status"); errors++; end
+      cfg_write(3, 0);
+      if (irq) begin $error("FAIL: IRQ mask did not suppress IRQ"); errors++; end
+      do_reset;
+      cfg_write(3, 4'b1000); // almost-empty only
+      repeat (4) @(posedge wr_clk);
+      cfg_read(4, data);
+      if (!data[3] || !irq) begin $error("FAIL: almost-empty IRQ/status"); errors++; end
+    end
+  endtask
+
+  task automatic test_sticky_errors;
+    logic [ADDR_W:0] data;
+    int i;
+    begin
+      $display("=== Sticky overflow/underflow status ===");
+      do_reset;
+      for (i = 0; i < DEPTH; i++) do_write(DW'(i));
+      repeat (3) @(posedge wr_clk);
+      @(negedge wr_clk); wr_en = 1;
+      @(negedge wr_clk); wr_en = 0;
+      repeat (3) @(posedge wr_clk);
+      cfg_read(5, data);
+      if (data[1:0] != 2'b01) begin $error("FAIL: overflow sticky"); errors++; end
+      cfg_write(5, 1);
+      repeat (4) @(posedge wr_clk);
+      cfg_read(5, data);
+      if (data[0]) begin $error("FAIL: overflow W1C"); errors++; end
+
+      do_reset;
+      repeat (3) @(posedge rd_clk);
+      @(negedge rd_clk); rd_en = 1;
+      @(negedge rd_clk); rd_en = 0;
+      repeat (4) @(posedge rd_clk);
+      repeat (4) @(posedge wr_clk);
+      cfg_read(5, data);
+      if (data[1:0] != 2'b10) begin $error("FAIL: underflow sticky"); errors++; end
+      cfg_write(5, 2);
+      repeat (4) @(posedge rd_clk);
+      cfg_read(5, data);
+      if (data[1]) begin $error("FAIL: underflow W1C"); errors++; end
+    end
+  endtask
+
+  task automatic test_occupancy_readback;
+    logic [ADDR_W:0] wr_level, rd_level;
+    int i;
+    begin
+      $display("=== Occupancy readback ===");
+      do_reset;
+      for (i = 0; i < 6; i++) do_write(DW'(i));
+      repeat (10) @(posedge wr_clk);
+      cfg_read(6, wr_level);
+      cfg_read(7, rd_level);
+      if (wr_level != 6 || rd_level != 6) begin
+        $error("FAIL: occupancy after writes: wr=%0d rd=%0d", wr_level, rd_level);
+        errors++;
+      end
+      repeat (2) do_read;
+      repeat (10) @(posedge wr_clk);
+      cfg_read(6, wr_level);
+      cfg_read(7, rd_level);
+      if (wr_level != 4 || rd_level != 4) begin
+        $error("FAIL: occupancy after reads: wr=%0d rd=%0d", wr_level, rd_level);
+        errors++;
+      end
+    end
+  endtask
+
+  task automatic test_configuration_readback;
+    logic [ADDR_W:0] data;
+    begin
+      $display("=== Configuration readback ===");
+      do_reset;
+      cfg_read(0, data);
+      if (data != (DEPTH + 4) / 5) begin $error("FAIL: default AE readback"); errors++; end
+      cfg_read(1, data);
+      if (data != (4 * DEPTH + 4) / 5) begin $error("FAIL: default AF readback"); errors++; end
+      cfg_read(2, data);
+      if (data != DEPTH) begin $error("FAIL: default depth readback"); errors++; end
+
+      cfg_write(0, 3);
+      cfg_write(1, 11);
+      cfg_write(2, 2);
+      cfg_read(0, data);
+      if (data != 3) begin $error("FAIL: programmed AE readback"); errors++; end
+      cfg_read(1, data);
+      if (data != 11) begin $error("FAIL: programmed AF readback"); errors++; end
+      cfg_read(2, data);
+      if (data != DEPTH/2) begin $error("FAIL: programmed depth readback"); errors++; end
+
+      cfg_write(0, {ADDR_W+1{1'b1}});
+      cfg_read(0, data);
+      if (data != DEPTH) begin $error("FAIL: saturated AE readback"); errors++; end
+    end
+  endtask
+
+  task automatic test_flush;
+    logic [ADDR_W:0] data;
+    int i;
+    begin
+      $display("=== Flush command and busy ===");
+      do_reset;
+      for (i = 0; i < 6; i++) do_write(DW'(i));
+      @(negedge wr_clk);
+      cfg_addr = 8; cfg_wdata = 1; cfg_we = 1;
+      @(negedge wr_clk);
+      cfg_we = 0; cfg_re = 1;
+      #1 data = cfg_rdata;
+      if (!data[0]) begin $error("FAIL: flush busy did not assert"); errors++; end
+      while (cfg_rdata[0]) @(negedge wr_clk);
+      cfg_re = 0;
+      repeat (4) @(posedge rd_clk);
+      if (!empty || dut.wr_ptr_bin != 0 || dut.rd_ptr_bin != 0) begin
+        $error("FAIL: flush did not empty FIFO"); errors++;
+      end
+      cfg_read(8, data);
+      if (data[0]) begin $error("FAIL: flush busy did not clear"); errors++; end
+      ref_mem.delete();
+      do_write(8'hA5);
+      do_read;
     end
   endtask
 
@@ -422,6 +574,11 @@ module tb_async_fifo;
 
     while (ref_mem.size() > 0 && !empty) do_read;
     test_programmable_flags;
+    test_irq_mask_status;
+    test_sticky_errors;
+    test_occupancy_readback;
+    test_configuration_readback;
+    test_flush;
     test_boundaries;
     test_depth_mode(0, DEPTH);
     test_depth_mode(1, DEPTH * 3 / 4);

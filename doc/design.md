@@ -25,6 +25,8 @@ Only Gray-coded values cross asynchronous domains. Each destination captures the
 - almost-empty: `ceil(DEPTH / 5)`
 - almost-full: `ceil(4 × DEPTH / 5)`
 - active depth: `DEPTH`
+- IRQ mask and sticky errors: zero
+- flush request/busy state: idle
 
 System integration should normally assert all three resets together. Do not retain FIFO contents across a reset of only one data domain.
 
@@ -52,18 +54,35 @@ Remote-pointer synchronization adds approximately two destination-clock cycles o
 
 ## Configuration Interface
 
-A write occurs on `cfg_clk` when `cfg_we` is high.
+A write occurs on `cfg_clk` when `cfg_we` is high. `cfg_rdata` is combinationally selected while `cfg_re` is high and is zero otherwise.
 
 | Address | Function | Data |
 |---:|---|---|
 | 0 | Almost-empty threshold | Unsigned entry count |
 | 1 | Almost-full threshold | Unsigned entry count |
 | 2 | Active-depth selector | Low two bits: full, 75%, 50%, 25% |
-| 3 | Reserved | Ignored |
+| 3 | IRQ mask | Bits 0..3 enable full, empty, almost-full, almost-empty |
+| 4 | IRQ status | Read-only synchronized level status; same bit assignment as mask |
+| 5 | Sticky errors | Bit 0 overflow, bit 1 underflow; write-one-to-clear |
+| 6 | Write occupancy | Read-only approximate entry count |
+| 7 | Read occupancy | Read-only approximate entry count |
+| 8 | Flush | Write bit 0 to request; read bit 0 for busy |
 
 Thresholds saturate at physical `DEPTH`. Active depth should only change while `empty` is asserted and no read/write request is active. There is no hardware handshake or rejection for an unsafe depth change.
 
 Configuration registers are binary at the external interface, encoded to Gray internally, synchronized into their consuming domains, then decoded. Hold each configuration value stable until the next write. Avoid back-to-back changes faster than both destination domains can observe; Gray encoding guarantees a single-bit transition only between adjacent numeric values, while arbitrary software writes can change multiple Gray bits. For strict atomic arbitrary-value CDC, add a request/acknowledge handshake.
+
+## Interrupts and Errors
+
+`irq` is the OR reduction of IRQ status AND IRQ mask. The four sources are synchronized levels, not edge-latched events. Sticky overflow records a write request while full; sticky underflow records a read request while empty. Error clear commands cross to the relevant data clock as toggles, then return through synchronized status readback. Sticky errors are separate from the IRQ sources.
+
+## Occupancy Readback
+
+Write and read Gray pointers are independently synchronized into `cfg_clk`, decoded, then subtracted modulo pointer width. Addresses 6 and 7 currently expose that same configuration-domain snapshot. The value may lag active traffic and should be used for monitoring, not cycle-exact flow control.
+
+## Flush
+
+Writing bit 0 at address 8 toggles a flush request when no flush is busy. The request crosses independently to both data domains. Each domain resets its local binary/Gray pointer and acknowledges the observed toggle. Busy remains asserted until both acknowledgements return to `cfg_clk`. New requests while busy are ignored. Stored RAM bits are not scrubbed; pointer reset makes prior entries inaccessible.
 
 ## Parameter Constraints
 
@@ -84,6 +103,10 @@ The self-checking testbench exercises:
 - configuration saturation and reserved address
 - blocked write/read at full/empty
 - all four active-depth modes
+- IRQ status, masking, and readback
+- sticky overflow/underflow detection and W1C clearing
+- occupancy and configuration readback
+- flush busy handshake, empty result, and post-flush traffic
 
 Commands:
 
