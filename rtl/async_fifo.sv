@@ -18,14 +18,14 @@ module async_fifo #(
 ) (
     // --- Write port ---
     input  wire                  wr_clk,
-    input  wire                  wr_rst_n,   // active-low, sync to wr_clk
+    input  wire                  wr_rst_n,   // async assert, wr_clk-sync release
     input  wire                  wr_en,
     input  wire [DW-1:0]         wr_data,
     output wire                  full,
 
     // --- Read port ---
     input  wire                  rd_clk,
-    input  wire                  rd_rst_n,   // active-low, sync to rd_clk
+    input  wire                  rd_rst_n,   // async assert, rd_clk-sync release
     input  wire                  rd_en,
     output wire [DW-1:0]         rd_data,
     output wire                  empty,
@@ -53,6 +53,22 @@ module async_fifo #(
   logic [PTR_W-1:0] rd_ptr_bin, rd_ptr_gray;
   logic [PTR_W-1:0] rd_ptr_bin_next, rd_ptr_gray_next;
 
+  // Reset synchronizers: asynchronous assertion, synchronous release.
+  (* ASYNC_REG = "TRUE" *) logic [1:0] wr_rst_sync;
+  (* ASYNC_REG = "TRUE" *) logic [1:0] rd_rst_sync;
+  wire wr_reset_n = wr_rst_sync[1];
+  wire rd_reset_n = rd_rst_sync[1];
+
+  always_ff @(posedge wr_clk or negedge wr_rst_n) begin
+    if (!wr_rst_n) wr_rst_sync <= '0;
+    else           wr_rst_sync <= {wr_rst_sync[0], 1'b1};
+  end
+
+  always_ff @(posedge rd_clk or negedge rd_rst_n) begin
+    if (!rd_rst_n) rd_rst_sync <= '0;
+    else           rd_rst_sync <= {rd_rst_sync[0], 1'b1};
+  end
+
   // Synchronizer registers
   // rd_ptr_gray → wr_clk domain
   logic [PTR_W-1:0] rd_ptr_gray_sync1, rd_ptr_gray_sync2;
@@ -62,8 +78,8 @@ module async_fifo #(
   // Internal write/read enables (gated by full/empty)
   logic do_write, do_read;
 
-  assign do_write = wr_en && !full;
-  assign do_read  = rd_en && !empty;
+  assign do_write = wr_reset_n && wr_en && !full;
+  assign do_read  = rd_reset_n && rd_en && !empty;
 
   // =========================================================================
   // WRITE DOMAIN
@@ -76,8 +92,8 @@ module async_fifo #(
   end
 
   // Pointer register
-  always_ff @(posedge wr_clk or negedge wr_rst_n) begin
-    if (!wr_rst_n) begin
+  always_ff @(posedge wr_clk or negedge wr_reset_n) begin
+    if (!wr_reset_n) begin
       wr_ptr_bin  <= '0;
       wr_ptr_gray <= '0;
     end else begin
@@ -94,8 +110,8 @@ module async_fifo #(
   end
 
   // Synchronize read-pointer gray into write domain
-  always_ff @(posedge wr_clk or negedge wr_rst_n) begin
-    if (!wr_rst_n) begin
+  always_ff @(posedge wr_clk or negedge wr_reset_n) begin
+    if (!wr_reset_n) begin
       rd_ptr_gray_sync1 <= '0;
       rd_ptr_gray_sync2 <= '0;
     end else begin
@@ -120,8 +136,8 @@ module async_fifo #(
   end
 
   // Pointer register
-  always_ff @(posedge rd_clk or negedge rd_rst_n) begin
-    if (!rd_rst_n) begin
+  always_ff @(posedge rd_clk or negedge rd_reset_n) begin
+    if (!rd_reset_n) begin
       rd_ptr_bin  <= '0;
       rd_ptr_gray <= '0;
     end else begin
@@ -141,8 +157,8 @@ module async_fifo #(
   assign rd_data = rd_data_reg;
 
   // Synchronize write-pointer gray into read domain
-  always_ff @(posedge rd_clk or negedge rd_rst_n) begin
-    if (!rd_rst_n) begin
+  always_ff @(posedge rd_clk or negedge rd_reset_n) begin
+    if (!rd_reset_n) begin
       wr_ptr_gray_sync1 <= '0;
       wr_ptr_gray_sync2 <= '0;
     end else begin
@@ -164,9 +180,9 @@ module async_fifo #(
 `ifdef FORMAL
   // synthesis translate_off
   default property:
-  assert property (@(posedge wr_clk) disable iff (!wr_rst_n)
+  assert property (@(posedge wr_clk) disable iff (!wr_reset_n)
     !(full && wr_en) |-> !full) else $error("Write when full!");
-  assert property (@(posedge rd_clk) disable iff (!rd_rst_n)
+  assert property (@(posedge rd_clk) disable iff (!rd_reset_n)
     !(empty && rd_en) |-> !empty) else $error("Read when empty!");
   // synthesis translate_on
 `endif
