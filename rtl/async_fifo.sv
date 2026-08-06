@@ -30,6 +30,14 @@ module async_fifo #(
     output wire [DW-1:0]         rd_data,
     output wire                  empty,
 
+    input  wire                  cfg_clk,
+    input  wire                  cfg_rst_n,
+    input  wire                  cfg_we,
+    input  wire [1:0]            cfg_addr,   // 0: AE, 1: AF, 2: active depth
+    input  wire [ADDR_W:0]       cfg_wdata,
+    output wire                  almost_empty,
+    output wire                  almost_full,
+
     // --- Optional status (sync-crossed, approximate) ---
     output wire [ADDR_W:0]       wr_ptr_gray_sync,  // write pointer synced to read
     output wire [ADDR_W:0]       rd_ptr_gray_sync   // read pointer synced to write
@@ -39,6 +47,11 @@ module async_fifo #(
   // Local params
   // -------------------------------------------------------------------------
   localparam int PTR_W = ADDR_W + 1;  // extra bit for full/empty disambiguation
+  localparam int unsigned AE_DEFAULT_INT = (DEPTH + 4) / 5;
+  localparam int unsigned AF_DEFAULT_INT = (4 * DEPTH + 4) / 5;
+  localparam logic [PTR_W-1:0] AE_DEFAULT = PTR_W'(AE_DEFAULT_INT);
+  localparam logic [PTR_W-1:0] AF_DEFAULT = PTR_W'(AF_DEFAULT_INT);
+  localparam logic [PTR_W-1:0] DEPTH_VALUE = PTR_W'(DEPTH);
 
   // -------------------------------------------------------------------------
   // Dual-port RAM
@@ -53,6 +66,48 @@ module async_fifo #(
   logic [PTR_W-1:0] rd_ptr_bin, rd_ptr_gray;
   logic [PTR_W-1:0] rd_ptr_bin_next, rd_ptr_gray_next;
 
+  logic [PTR_W-1:0] ae_cfg_gray, af_cfg_gray;
+  logic [PTR_W-1:0] depth_cfg_gray;
+  (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] ae_gray_sync1, ae_gray_sync2;
+  (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] af_gray_sync1, af_gray_sync2;
+  logic [PTR_W-1:0] ae_threshold, af_threshold;
+  (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] depth_gray_sync1, depth_gray_sync2;
+  logic [PTR_W-1:0] active_depth;
+
+  function automatic logic [PTR_W-1:0] bin_to_gray(input logic [PTR_W-1:0] bin);
+    return bin ^ (bin >> 1);
+  endfunction
+
+  function automatic logic [PTR_W-1:0] gray_to_bin(input logic [PTR_W-1:0] gray);
+    logic [PTR_W-1:0] bin;
+    bin[PTR_W-1] = gray[PTR_W-1];
+    for (int i = PTR_W-2; i >= 0; i--)
+      bin[i] = bin[i+1] ^ gray[i];
+    return bin;
+  endfunction
+
+  always_ff @(posedge cfg_clk or negedge cfg_rst_n) begin
+    if (!cfg_rst_n) begin
+      ae_cfg_gray <= bin_to_gray(AE_DEFAULT);
+      af_cfg_gray <= bin_to_gray(AF_DEFAULT);
+      depth_cfg_gray <= bin_to_gray(DEPTH_VALUE);
+    end else if (cfg_we) begin
+      case (cfg_addr)
+        2'd0: ae_cfg_gray <= bin_to_gray((cfg_wdata > DEPTH_VALUE) ? DEPTH_VALUE : cfg_wdata);
+        2'd1: af_cfg_gray <= bin_to_gray((cfg_wdata > DEPTH_VALUE) ? DEPTH_VALUE : cfg_wdata);
+        2'd2: begin
+          case (cfg_wdata[1:0])
+            2'd0: depth_cfg_gray <= bin_to_gray(DEPTH_VALUE);
+            2'd1: depth_cfg_gray <= bin_to_gray(PTR_W'((DEPTH * 3) / 4));
+            2'd2: depth_cfg_gray <= bin_to_gray(PTR_W'(DEPTH / 2));
+            2'd3: depth_cfg_gray <= bin_to_gray(PTR_W'(DEPTH / 4));
+          endcase
+        end
+        default: ;
+      endcase
+    end
+  end
+
   // Reset synchronizers: asynchronous assertion, synchronous release.
   (* ASYNC_REG = "TRUE" *) logic [1:0] wr_rst_sync;
   (* ASYNC_REG = "TRUE" *) logic [1:0] rd_rst_sync;
@@ -64,9 +119,36 @@ module async_fifo #(
     else           wr_rst_sync <= {wr_rst_sync[0], 1'b1};
   end
 
+  always_ff @(posedge wr_clk or negedge wr_rst_n) begin
+    if (!wr_rst_n)
+      {depth_gray_sync2, depth_gray_sync1} <= {2{bin_to_gray(DEPTH_VALUE)}};
+    else
+      {depth_gray_sync2, depth_gray_sync1} <= {depth_gray_sync1, depth_cfg_gray};
+  end
+
   always_ff @(posedge rd_clk or negedge rd_rst_n) begin
     if (!rd_rst_n) rd_rst_sync <= '0;
     else           rd_rst_sync <= {rd_rst_sync[0], 1'b1};
+  end
+
+  always_ff @(posedge wr_clk or negedge wr_rst_n) begin
+    if (!wr_rst_n)
+      {af_gray_sync2, af_gray_sync1} <= {2{bin_to_gray(AF_DEFAULT)}};
+    else
+      {af_gray_sync2, af_gray_sync1} <= {af_gray_sync1, af_cfg_gray};
+  end
+
+  always_ff @(posedge rd_clk or negedge rd_rst_n) begin
+    if (!rd_rst_n)
+      {ae_gray_sync2, ae_gray_sync1} <= {2{bin_to_gray(AE_DEFAULT)}};
+    else
+      {ae_gray_sync2, ae_gray_sync1} <= {ae_gray_sync1, ae_cfg_gray};
+  end
+
+  always_comb begin
+    af_threshold = gray_to_bin(af_gray_sync2);
+    ae_threshold = gray_to_bin(ae_gray_sync2);
+    active_depth = gray_to_bin(depth_gray_sync2);
   end
 
   // Synchronizer registers
@@ -121,9 +203,14 @@ module async_fifo #(
   end
 
   // Full flag: MSB and MSB-1 inverted, rest equal
-  assign full = (wr_ptr_gray == {~rd_ptr_gray_sync2[PTR_W-1],
-                                  ~rd_ptr_gray_sync2[PTR_W-2],
-                                  rd_ptr_gray_sync2[PTR_W-3:0]});
+  logic [PTR_W-1:0] rd_ptr_bin_sync;
+  always_comb begin
+    rd_ptr_bin_sync[PTR_W-1] = rd_ptr_gray_sync2[PTR_W-1];
+    for (int i = PTR_W-2; i >= 0; i--)
+      rd_ptr_bin_sync[i] = rd_ptr_bin_sync[i+1] ^ rd_ptr_gray_sync2[i];
+  end
+  assign full = ((wr_ptr_bin - rd_ptr_bin_sync) >= active_depth);
+  assign almost_full = ((wr_ptr_bin - rd_ptr_bin_sync) >= af_threshold);
 
   // =========================================================================
   // READ DOMAIN
@@ -169,6 +256,14 @@ module async_fifo #(
 
   // Empty flag: pointers equal
   assign empty = (rd_ptr_gray == wr_ptr_gray_sync2);
+
+  logic [PTR_W-1:0] wr_ptr_bin_sync;
+  always_comb begin
+    wr_ptr_bin_sync[PTR_W-1] = wr_ptr_gray_sync2[PTR_W-1];
+    for (int i = PTR_W-2; i >= 0; i--)
+      wr_ptr_bin_sync[i] = wr_ptr_bin_sync[i+1] ^ wr_ptr_gray_sync2[i];
+  end
+  assign almost_empty = ((wr_ptr_bin_sync - rd_ptr_bin) <= ae_threshold);
 
   // Optional status outputs (already synchronized gray values)
   assign wr_ptr_gray_sync = wr_ptr_gray_sync2; // synced to read

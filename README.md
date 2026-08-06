@@ -36,6 +36,7 @@ Fully synthesizable asynchronous (dual-clock) FIFO written in SystemVerilog.
 | CDC safety           | 2-flop synchronizers + Gray-code pointers  |
 | Full detection       | Write domain, compares synced read ptr    |
 | Empty detection      | Read domain, compares synced write ptr     |
+| Almost flags         | Programmable occupancy thresholds          |
 | RAM style            | Simple dual-port, 1 rw port each side     |
 | Reset                | Asynchronous assert, synchronous deassert  |
 | Parameterizable      | Data width (DW), depth (DEPTH, pow2)       |
@@ -86,6 +87,16 @@ async-fifo/
 | `rd_data`   | O   | Read data [DW-1:0]                 |
 | `empty`     | O   | FIFO empty flag                    |
 
+### Configuration Port
+
+Write `cfg_wdata` using `cfg_clk`, `cfg_rst_n`, and `cfg_we`. `cfg_addr=0`
+sets almost-empty; `cfg_addr=1` sets almost-full. Values saturate at `DEPTH`.
+`cfg_addr=2` selects active FIFO depth using `cfg_wdata[1:0]`: `0` = 100%,
+`1` = 75%, `2` = 50%, `3` = 25%. Change depth only while FIFO is empty.
+Defaults: `ceil(20% * DEPTH)` and `ceil(80% * DEPTH)`. Configuration values
+are Gray-encoded before crossing clock domains, then decoded locally.
+`almost_empty` is in the `rd_clk` domain; `almost_full` is in the `wr_clk` domain.
+
 ## Simulation
 
 ### Icarus Verilog
@@ -99,6 +110,20 @@ bash sim/run_iverilog.sh
 cd async-fifo
 bash sim/run_verilator.sh
 ```
+
+### Coverage
+
+```bash
+make coverage
+make coverage-report
+```
+
+The testbench covers all four active-depth modes, assertion and clearing of
+both programmable almost flags, full/empty boundaries, concurrent traffic,
+and randomized traffic. Verilator writes `coverage.info` and annotated source
+under `coverage-annotated/`.
+`make coverage-report` runs and reports line and toggle coverage separately;
+functional bins are printed directly by the testbench.
 
 ### Make targets
 ```bash

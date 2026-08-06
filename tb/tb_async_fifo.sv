@@ -9,6 +9,7 @@
 //   4) Simultaneous read+write (mixed frequency)
 //   5) Random stress with scoreboard
 //   6) Gray-code pointer validation
+//   7) Programmable thresholds and active-depth modes
 //
 // Usage (Icarus Verilog):
 //   iverilog -g2012 -o sim/tb_out -I rtl \
@@ -36,6 +37,9 @@ module tb_async_fifo;
   logic                  wr_en, rd_en;
   logic  [DW-1:0]        wr_data, rd_data;
   logic                  full, empty;
+  logic                  cfg_we, almost_empty, almost_full;
+  logic [1:0]            cfg_addr;
+  logic [ADDR_W:0]       cfg_wdata;
   logic [ADDR_W:0]       wr_ptr_gray_sync, rd_ptr_gray_sync;
 
   // --- DUT ---
@@ -53,6 +57,13 @@ module tb_async_fifo;
     .rd_en            (rd_en),
     .rd_data          (rd_data),
     .empty            (empty),
+    .cfg_clk          (wr_clk),
+    .cfg_rst_n        (wr_rst_n),
+    .cfg_we           (cfg_we),
+    .cfg_addr         (cfg_addr),
+    .cfg_wdata        (cfg_wdata),
+    .almost_empty     (almost_empty),
+    .almost_full      (almost_full),
     .wr_ptr_gray_sync (),
     .rd_ptr_gray_sync ()
   );
@@ -75,6 +86,12 @@ module tb_async_fifo;
   int            errors = 0;
   int            wr_count = 0;
   int            rd_count = 0;
+  bit [3:0]      depth_coverage = '0;
+  bit            ae_assert_coverage = 0;
+  bit            ae_clear_coverage = 0;
+  bit            af_assert_coverage = 0;
+  bit            af_clear_coverage = 0;
+  bit [3:0]      boundary_coverage = '0; // cfg saturation, invalid addr, blocked W/R
 
   // -----------------------------------------------------------------------
   // Reset task
@@ -86,6 +103,10 @@ module tb_async_fifo;
       wr_en    = 0;
       rd_en    = 0;
       wr_data  = 0;
+      cfg_we    = 0;
+      cfg_addr  = 0;
+      cfg_wdata = 0;
+      ref_mem.delete();
       // Hold reset across both clock edges
       @(posedge wr_clk);
       @(posedge wr_clk);
@@ -95,6 +116,95 @@ module tb_async_fifo;
       rd_rst_n = 1;
       @(posedge wr_clk);
       @(posedge rd_clk);
+    end
+  endtask
+
+  task automatic cfg_write(input logic [1:0] addr,
+                           input logic [ADDR_W:0] data);
+    begin
+      @(negedge wr_clk);
+      cfg_addr = addr;
+      cfg_wdata = data;
+      cfg_we = 1;
+      @(negedge wr_clk);
+      cfg_we = 0;
+      repeat (4) @(posedge wr_clk);
+      repeat (4) @(posedge rd_clk);
+    end
+  endtask
+
+  task automatic test_depth_mode(input int mode, input int expected_depth);
+    int i;
+    begin
+      $display("=== Depth mode %0d: %0d entries ===", mode, expected_depth);
+      do_reset;
+      cfg_write(2, mode);
+      for (i = 0; i < expected_depth; i++) do_write(DW'(i));
+      repeat (3) @(posedge wr_clk);
+      if (!full) begin
+        $error("FAIL: mode %0d not full at %0d entries", mode, expected_depth);
+        errors++;
+      end else depth_coverage[mode] = 1;
+      for (i = 0; i < expected_depth; i++) do_read;
+      repeat (3) @(posedge rd_clk);
+    end
+  endtask
+
+  task automatic test_programmable_flags;
+    int i;
+    begin
+      $display("=== Programmable almost flags ===");
+      do_reset;
+      cfg_write(0, 2);   // almost empty at <= 2
+      cfg_write(1, 12);  // almost full at >= 12
+      ae_assert_coverage = almost_empty;
+      for (i = 0; i < 4; i++) do_write(DW'(i));
+      repeat (4) @(posedge rd_clk);
+      ae_clear_coverage = !almost_empty;
+      for (i = 4; i < 12; i++) do_write(DW'(i));
+      repeat (4) @(posedge wr_clk);
+      af_assert_coverage = almost_full;
+      for (i = 0; i < 6; i++) do_read;
+      repeat (4) @(posedge wr_clk);
+      af_clear_coverage = !almost_full;
+      if (!(ae_assert_coverage && ae_clear_coverage &&
+            af_assert_coverage && af_clear_coverage)) begin
+        $error("FAIL: almost flag coverage incomplete");
+        errors++;
+      end
+      do_reset;
+    end
+  endtask
+
+  task automatic test_boundaries;
+    logic [ADDR_W:0] saved_ae;
+    logic [ADDR_W:0] saved_wr_ptr;
+    begin
+      $display("=== Configuration and access boundaries ===");
+      do_reset;
+
+      cfg_write(0, {ADDR_W+1{1'b1}});
+      if (dut.ae_threshold == DEPTH) boundary_coverage[0] = 1;
+      else begin $error("FAIL: AE threshold did not saturate"); errors++; end
+
+      saved_ae = dut.ae_threshold;
+      cfg_write(3, 0);
+      if (dut.ae_threshold == saved_ae) boundary_coverage[1] = 1;
+      else begin $error("FAIL: invalid cfg address changed state"); errors++; end
+
+      cfg_write(2, 3); // quarter depth
+      repeat (DEPTH/4) do_write(DW'($urandom));
+      repeat (3) @(posedge wr_clk);
+      saved_wr_ptr = dut.wr_ptr_bin;
+      @(negedge wr_clk); wr_en = 1;
+      @(posedge wr_clk); #1 wr_en = 0;
+      if (full && dut.wr_ptr_bin == saved_wr_ptr) boundary_coverage[2] = 1;
+      else begin $error("FAIL: write was not blocked at full"); errors++; end
+
+      do_reset;
+      rd_en = 1; repeat (2) @(posedge rd_clk); #1 rd_en = 0;
+      if (empty) boundary_coverage[3] = 1;
+      else begin $error("FAIL: read was not blocked at empty"); errors++; end
     end
   endtask
 
@@ -121,6 +231,7 @@ module tb_async_fifo;
   task automatic do_read;
     logic [DW-1:0] expected;
     begin
+      while (empty) @(posedge rd_clk);
       @(negedge rd_clk);
       rd_en = 1;
       @(posedge rd_clk);
@@ -309,6 +420,14 @@ module tb_async_fifo;
     test_simultaneous_rw;
     test_random_stress;
 
+    while (ref_mem.size() > 0 && !empty) do_read;
+    test_programmable_flags;
+    test_boundaries;
+    test_depth_mode(0, DEPTH);
+    test_depth_mode(1, DEPTH * 3 / 4);
+    test_depth_mode(2, DEPTH / 2);
+    test_depth_mode(3, DEPTH / 4);
+
     // Drain remaining
     while (ref_mem.size() > 0 && !empty) do_read;
 
@@ -316,6 +435,19 @@ module tb_async_fifo;
     $display("  Total writes: %0d", wr_count);
     $display("  Total reads:  %0d", rd_count);
     $display("  Errors:       %0d", errors);
+    $display("  Depth coverage: %b", depth_coverage);
+    $display("  Flag coverage: AE=%0b/%0b AF=%0b/%0b",
+             ae_assert_coverage, ae_clear_coverage,
+             af_assert_coverage, af_clear_coverage);
+    $display("  Boundary coverage: %b", boundary_coverage);
+    if (depth_coverage != 4'b1111) begin
+      $error("FAIL: depth-mode coverage incomplete");
+      errors++;
+    end
+    if (boundary_coverage != 4'b1111) begin
+      $error("FAIL: boundary coverage incomplete");
+      errors++;
+    end
     $display("========================================");
     if (errors == 0)
       $display("  *** ALL TESTS PASSED ***");

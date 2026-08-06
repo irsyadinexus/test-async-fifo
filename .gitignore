@@ -1,2 +1,5 @@
 obj_dir/
 sim/tb_out.vvp
+coverage.dat
+coverage-*.info
+coverage-annotated/

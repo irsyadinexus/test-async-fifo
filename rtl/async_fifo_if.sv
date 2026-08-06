@@ -19,6 +19,10 @@ interface async_fifo_if #(parameter int DW = 8, parameter int DEPTH = 16) ();
   logic                  rd_en;
   logic  [DW-1:0]        rd_data;
   logic                  empty;
+  logic                  cfg_clk, cfg_rst_n, cfg_we;
+  logic [1:0]            cfg_addr;
+  logic [$clog2(DEPTH):0] cfg_wdata;
+  logic                  almost_empty, almost_full;
 
   logic [$clog2(DEPTH):0] wr_ptr_gray_sync;
   logic [$clog2(DEPTH):0] rd_ptr_gray_sync;
