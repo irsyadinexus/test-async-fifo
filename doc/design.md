@@ -67,6 +67,7 @@ A write occurs on `cfg_clk` when `cfg_we` is high. `cfg_rdata` is combinationall
 | 6 | Write occupancy | Read-only approximate entry count |
 | 7 | Read occupancy | Read-only approximate entry count |
 | 8 | Flush | Write bit 0 to request; read bit 0 for busy |
+| 9 | Reserved in the core | Reads `0`; the AHB wrapper implements MODE here (see [Bus Wrappers](#bus-wrappers)) |
 
 Thresholds saturate at physical `DEPTH`. Active depth should only change while `empty` is asserted and no read/write request is active. There is no hardware handshake or rejection for an unsafe depth change.
 
@@ -92,6 +93,162 @@ Writing bit 0 at address 8 toggles a flush request when no flush is busy. The re
 
 While a domain is in its flush window, `do_write`/`do_read` are gated off and `empty` is forced high in the read domain, so no read can be accepted against a stale write pointer (which would advance the read pointer past the write pointer and latch `full` forever). New flush requests while busy are ignored. Stored RAM bits are not scrubbed; pointer reset makes prior entries inaccessible.
 
+## Bus Wrappers
+
+Three optional wrappers sit between a bus and the unchanged core. They are not part
+of `async_fifo` and add no logic to it. Common rules: bus data is 32 bits wide (a
+push takes the low `DW` bits, a pop returns zero-extended data), configuration
+registers are decoded from word offset `[5:2]`, and the core's combinational
+`cfg_rdata` is sampled in the same cycle it is selected. A pop always costs one wait
+state because the core read data is registered. A push while `full` or a pop while
+`empty` stalls the transfer rather than dropping data, and no wrapper returns an
+error response.
+
+### APB wrapper
+
+`rtl/fifo_apb_wrapper.sv`. One clock domain: the FIFO write, read, and config
+domains all run on `pclk`, so no clock-group constraints are needed beyond the
+core's own. `paddr[8]` selects the window (`0` = configuration registers at byte
+`0x000..0x03C`, `1` = data window, e.g. `0x100`; lower bits of the data window are
+ignored). `rtl/fifo_apb_cfg.sv` is the shared combinational APB-to-`cfg_*` bridge
+used by this wrapper and the AHB wrapper.
+
+| Signal | Dir | Clock | Notes |
+|---|---|---|---|
+| `pclk` | I | — | Sole clock: core write/read/config domains and the APB slave |
+| `presetn` | I | — | Reset for all three core domains; async assert, synchronized release |
+| `psel`, `penable`, `pwrite` | I | pclk | APB select, enable, direction |
+| `paddr[31:0]` | I | pclk | `[8]` window select, `[5:2]` register offset; other bits ignored |
+| `pwdata[31:0]` | I | pclk | Push data `[DW-1:0]`, or register write data `[ADDR_W:0]` |
+| `prdata[31:0]` | O | pclk | Zero-extended register readback, or the popped word in the completing pop cycle |
+| `pready` | O | pclk | `0` while stalled: push while `full`, pop while `empty`, or the pop data cycle |
+| `pslverr` | O | pclk | Tied `0` |
+| `irq` | O | pclk | OR of masked IRQ status bits |
+| `almost_empty` | O | pclk | Core almost-empty flag |
+| `almost_full` | O | pclk | Core almost-full flag |
+| `wr_ptr_gray_sync[ADDR_W:0]` | O | pclk | Write pointer synchronized into the read domain |
+| `rd_ptr_gray_sync[ADDR_W:0]` | O | pclk | Read pointer synchronized into the write domain |
+
+A single APB master owns the bus, so a stalled push/pop cannot be resolved by
+another access. Poll IRQ status (register 4) before pushing into a possibly-full
+FIFO or popping an empty one.
+
+### AHB wrapper
+
+`rtl/fifo_ahb_wrapper.sv`. Three clock inputs plus two optional raw-side clocks:
+`hclk` clocks the AHB engine and every FIFO side the engine owns, `cfg_clk` clocks
+the configuration port and the wrapper-local MODE register, and `wr_clk`/`rd_clk`
+clock a FIFO side released to external logic by MODE. Treat `hclk` and each of
+`wr_clk`/`rd_clk` as an asynchronous pair when the corresponding raw side is used;
+`cfg_clk` is asynchronous to `hclk` and to both raw clocks. In MODE 0/3, tie
+`wr_clk`/`rd_clk` and `wr_rst_n`/`rd_rst_n` to `hclk`/`hresetn`.
+
+| Signal | Dir | Clock | Notes |
+|---|---|---|---|
+| `hclk` | I | — | AHB engine and the FIFO side(s) the engine owns |
+| `hresetn` | I | — | Resets the AHB engine only (latched request, read capture); not the FIFO |
+| `hsel` | I | hclk | Slave select during the address phase |
+| `haddr[31:0]` | I | hclk | Ignored: one data window |
+| `htrans[1:0]` | I | hclk | `[1]` (NONSEQ/SEQ) starts a transfer; `[0]` ignored |
+| `hwrite` | I | hclk | `1` = push, `0` = pop |
+| `hsize[2:0]` | I | hclk | Ignored: full 32-bit word transfers only |
+| `hwdata[31:0]` | I | hclk | Push data `[DW-1:0]`, sampled in the data phase |
+| `hrdata[31:0]` | O | hclk | Zero-extended popped word in the completing data phase; `0` otherwise and for MODE 1 reads |
+| `hready` | I | hclk | Global HREADY; tie to `hreadyout` in a single-slave system |
+| `hreadyout` | O | hclk | `0` while a data phase waits |
+| `hresp` | O | hclk | Tied `0` (OKAY) |
+| `cfg_clk` | I | — | Configuration port and MODE register |
+| `cfg_presetn` | I | — | Config-domain reset (also the core `cfg_rst_n`) |
+| `cfg_psel`, `cfg_penable`, `cfg_pwrite` | I | cfg_clk | APB control |
+| `cfg_paddr[31:0]` | I | cfg_clk | `[5:2]` word offset `0..15`; offset `9` is MODE |
+| `cfg_pwdata[31:0]` | I | cfg_clk | Register write data; `[1:0]` carries MODE |
+| `cfg_prdata[31:0]` | O | cfg_clk | Zero-extended readback, MODE at offset `9` |
+| `cfg_pready` | O | cfg_clk | Constant `1` |
+| `wr_clk`, `wr_rst_n` | I | wr_clk | Raw write port; drives the core only in MODE 2 |
+| `rd_clk`, `rd_rst_n` | I | rd_clk | Raw read port; drives the core only in MODE 1 |
+| `ext_wr_en` | I | wr_clk | Raw write enable, used only in MODE 2 |
+| `ext_wr_data[DW-1:0]` | I | wr_clk | Raw write data, used only in MODE 2 |
+| `ext_rd_en` | I | rd_clk | Raw read enable, used only in MODE 1 |
+| `ext_rd_data[DW-1:0]` | O | rd_clk | Registered core read data; meaningful in MODE 1 |
+| `full` | O | write | Core full flag; hclk-clocked while the engine owns the write side |
+| `empty` | O | read | Core empty flag; hclk-clocked while the engine owns the read side |
+| `almost_full`, `almost_empty` | O | write / read | Core threshold flags |
+| `irq` | O | cfg_clk | OR of masked IRQ status bits |
+| `wr_ptr_gray_sync[ADDR_W:0]` | O | read | Write pointer synchronized into the read domain |
+| `rd_ptr_gray_sync[ADDR_W:0]` | O | write | Read pointer synchronized into the write domain |
+
+MODE (configuration offset 9, wrapper-local; the core decodes it as reserved and
+reads `0`) selects port ownership:
+
+| MODE | AHB pushes | AHB pops | Raw side released |
+|:---:|---|---|---|
+| 0 | yes | yes | none |
+| 1 | yes | no (reads return `0`) | read side on `rd_clk` |
+| 2 | no (writes are accepted with no effect) | yes | write side on `wr_clk` |
+| 3 | yes (as 0) | yes (as 0) | none |
+
+The clock muxes are plain combinational muxes with no live-switch protection.
+Change MODE only with the affected data-domain reset asserted, the FIFO empty, and
+the AHB bus idle: assert `wr_rst_n` and/or `rd_rst_n`, write MODE over the
+configuration port, then release. The AHB engine's `full`/`empty` usage is safe
+because the side it owns is always the `hclk` side after the mux.
+
+A data phase that cannot complete (push while `full`, pop while `empty`) stretches
+`HREADYOUT` indefinitely and stalls the whole AHB bus, so poll IRQ status
+(register 4) first. `hresetn` resets only the AHB engine, which abandons such a
+latched request without disturbing FIFO contents provided `wr_rst_n`/`rd_rst_n`
+stay high. Integrators that tie the FIFO resets to `hresetn` lose the contents.
+
+### AXI-Stream wrapper
+
+`rtl/fifo_axis_wrapper.sv`. Three clock domains: `aclk` (AXI4-Lite config and the
+core config port), `s_axis_aclk` (FIFO write side), and `m_axis_aclk` (FIFO read
+side). All three are pairwise asynchronous; constrain them as independent clock
+groups. No TLAST/TKEEP/TSTRB: the FIFO carries no packet boundaries.
+
+| Signal | Dir | Clock | Notes |
+|---|---|---|---|
+| `aclk` | I | — | Configuration port |
+| `aresetn` | I | — | Config-domain reset |
+| `awaddr[31:0]` | I | aclk | `[5:2]` word offset `0..15` |
+| `awvalid`, `awready` | I / O | aclk | Address handshake; `awready` low while `aw_pending` or `B` is pending |
+| `wdata[31:0]` | I | aclk | Register write data; `[ADDR_W:0]` reaches the core |
+| `wvalid`, `wready` | I / O | aclk | Data handshake, independent of `AW` |
+| `bresp[1:0]` | O | aclk | Always `OKAY` |
+| `bvalid`, `bready` | O / I | aclk | Write response handshake |
+| `araddr[31:0]` | I | aclk | `[5:2]` word offset `0..15` |
+| `arvalid`, `arready` | I / O | aclk | Read address handshake; one outstanding read |
+| `rdata[31:0]` | O | aclk | Zero-extended register readback |
+| `rresp[1:0]` | O | aclk | Always `OKAY` |
+| `rvalid`, `rready` | O / I | aclk | Read data handshake |
+| `s_axis_aclk` | I | — | FIFO write clock |
+| `s_axis_aresetn` | I | — | FIFO write-side reset |
+| `s_axis_tvalid`, `s_axis_tdata[DW-1:0]` | I | s_axis_aclk | Push request and data |
+| `s_axis_tready` | O | s_axis_aclk | `!full`, gated by the synchronized reset release |
+| `m_axis_aclk` | I | — | FIFO read clock |
+| `m_axis_aresetn` | I | — | FIFO read-side reset |
+| `m_axis_tvalid`, `m_axis_tdata[DW-1:0]` | O | m_axis_aclk | Pop result; `tvalid` does not depend on `tready` |
+| `m_axis_tready` | I | m_axis_aclk | Sink accept |
+| `irq` | O | aclk | OR of masked IRQ status bits |
+| `almost_full` | O | write | Core almost-full flag |
+| `almost_empty` | O | read | Core almost-empty flag |
+| `wr_ptr_gray_sync[ADDR_W:0]` | O | read | Write pointer synchronized into the read domain |
+| `rd_ptr_gray_sync[ADDR_W:0]` | O | write | Read pointer synchronized into the write domain |
+
+The `m_axis` output stage is a two-entry pipeline: the core's registered `rd_data`
+is stage 1 and a skid register is stage 2, with a bypass path when the skid is
+empty. `m_axis_tvalid = s1_full | out_valid` and the data mux selects the skid
+first, so the oldest word is always presented and one word per cycle is sustained
+while `tready` stays high. With `tready` low the pipeline absorbs two words before
+backpressure reaches the FIFO (through `full`), and no word is lost or duplicated.
+
+AXI4-Lite rules: `AW` and `W` are latched independently and executed together, so an
+address may be presented before or after its data; exactly one `B` is returned and
+held until `BREADY`. Reads accept a single outstanding `AR`, and the register value
+is captured on the `AR` handshake cycle (the read address is decoded
+combinationally for that access). `arready` also deasserts in a cycle where a
+config write executes, so `cfg_addr` always has one driver.
+
 ## Parameter Constraints
 
 - `DEPTH` must be a power of two and at least 2 (checked at time 0 with `$fatal`).
@@ -101,7 +258,7 @@ While a domain is in its flush window, `do_write`/`do_read` are gated off and `e
 
 ## Verification
 
-The self-checking testbench exercises:
+The testbenches exercise:
 
 - reset behavior
 - fill and drain boundaries
@@ -116,6 +273,15 @@ The self-checking testbench exercises:
 - occupancy and configuration readback
 - flush busy handshake, empty result, pointer-status outputs, and post-flush traffic
 - flush-resume CDC: reads blocked until the write pointer resyncs (`tb/tb_flush_hazard.sv`)
+- APB wrapper: register reset values and readback, reserved offset 9, data-window
+  round trip, push-while-full and pop-while-empty wait states, IRQ through the mask
+  (`tb/tb_apb_wrapper.sv`)
+- AHB wrapper: MODE 0 round trip, write/read wait states with FIFO contents preserved
+  across an engine reset, MODE 1 raw read side, MODE 2 raw write side, MODE 3 behaving
+  as 0 (`tb/tb_ahb_wrapper.sv`)
+- AXI-Stream wrapper: cross-clock 32-word ordering, 50-cycle mid-stream backpressure,
+  fill-to-full and drain-to-empty, 10/10-cycle `m_axis_tvalid` throughput, AXI4-Lite
+  readback, IRQ (`tb/tb_axis_wrapper.sv`)
 
 Commands:
 
@@ -127,7 +293,7 @@ make coverage-report
 
 `make coverage-report` runs separate Verilator line and toggle builds. Functional bins are reported by the testbench. Generated coverage files and build products are ignored by Git.
 
-`make iverilog` runs two programs: the main testbench and the flush-resume regression (`tb/tb_flush_hazard.sv`), which fixes a 5 MHz / 50 MHz / 500 MHz clock ratio that makes the flush window large enough for the pre-fix wedge to appear. The regression is Icarus-only; Verilator coverage keeps the main testbench as its single top.
+`make iverilog` runs six programs: the main testbench, the flush-hazard regression, the two-FIFO chain, and the three wrapper testbenches. The flush-hazard regression (`tb/tb_flush_hazard.sv`) fixes a 5 MHz / 50 MHz / 500 MHz clock ratio that makes the flush window large enough for the pre-fix wedge to appear. Verilator coverage keeps the main testbench as its single top, so the wrapper and flush-hazard sources are Icarus-only.
 
 The `FORMAL` assertions are simulation/formal-only. Icarus parses them but does not implement concurrent assertions, so use `iverilog -g2012 -gsupported-assertions -DFORMAL` to syntax-check that variant; Verilator accepts it under `--assert`.
 
@@ -135,6 +301,8 @@ The `FORMAL` assertions are simulation/formal-only. Icarus parses them but does 
 
 - Preserve the two-stage synchronizers and reset synchronizers.
 - Apply asynchronous clock-group constraints between `wr_clk`, `rd_clk`, and `cfg_clk`.
+- Wrappers add clock groups: `pclk` (APB, one group), `hclk`/`cfg_clk`/`wr_clk`/`rd_clk` (AHB), and `aclk`/`s_axis_aclk`/`m_axis_aclk` (AXI-Stream). Constrain each pair as asynchronous.
+- Treat the AHB MODE clock muxes as quasi-static: they are combinational muxes, so synthesis cannot retime across them and a live switch is unsupported.
 - Review `fpga/constraints.sdc`; adapt object paths to the synthesis tool.
 - Constrain Gray buses for skew where supported, so source bits cannot arrive more than one fast-clock period apart.
 - Confirm dual-port memory inference in synthesis reports.
