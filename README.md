@@ -25,17 +25,21 @@ need `verilator_coverage` on `PATH` (it ships with Verilator).
 
 ```bash
 make lint            # RTL lint
-make iverilog        # functional simulation + flush-resume regression (Icarus)
-make two-fifo        # two-FIFO controller-chain simulation only (Icarus)
+make iverilog        # functional + flush-hazard + two-FIFO chain (Icarus)
+make two-fifo        # two-FIFO controller-chain simulation (DEPTH=64) only
 make sim             # Verilator simulation + combined coverage data
 make coverage-report # separate line/toggle reports
 ```
 
-Latest verified results (`DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.7 MHz,
-commit `77a5864`, 2026-11-24):
+Latest verified results (commit `8aed8ea`, 2026-11-24). Functional tests use
+`DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.7 MHz:
 
 - Functional tests: all passed, 0 errors; 334 writes and 282 reads modeled and checked
 - Flush-resume regression (wr 5 MHz / rd 50 MHz / cfg 500 MHz): passed
+- Two-FIFO chain (`DEPTH=64`, 64 words per direction, ctl 12 ns / f1w 10 ns /
+  f1r 13 ns / f2w 21 ns / f2r 9 ns, 100 ctl cycles before every access): passed,
+  0 errors; 128 writes and 128 reads per FIFO, 512 compared transfers, ~619 µs
+  of simulated time; waveform in `sim/tb_two_fifo.vcd`
 - Depth modes: 4/4
 - Almost-flag transitions: 4/4
 - Boundary cases: 4/4
