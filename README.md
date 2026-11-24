@@ -1,10 +1,10 @@
 # Configurable Async FIFO
 
-Synthesizable SystemVerilog asynchronous FIFO with independent write/read clocks, Gray-code CDC, programmable warning thresholds, and selectable active depth.
+Synthesizable SystemVerilog asynchronous FIFO with independent write, read, and configuration clocks, Gray-code CDC, programmable warning thresholds, and selectable active depth.
 
 ## Features
 
-- Independent `wr_clk` and `rd_clk`
+- Independent `wr_clk`, `rd_clk`, and `cfg_clk` (any frequency relationship)
 - Gray-coded pointers with two-stage synchronizers
 - Asynchronous reset assertion, synchronous release per clock domain
 - Registered read output; dual-port RAM inference
@@ -24,13 +24,14 @@ Requirements: Icarus Verilog and/or Verilator. The coverage targets additionally
 need `verilator_coverage` on `PATH` (it ships with Verilator).
 
 ```bash
-make lint       # RTL lint
-make iverilog   # functional simulation
-make sim        # Verilator simulation + combined coverage data
-make coverage-report  # separate line/toggle reports
+make lint            # RTL lint
+make iverilog        # functional simulation + flush-resume regression (Icarus)
+make sim             # Verilator simulation + combined coverage data
+make coverage-report # separate line/toggle reports
 ```
 
-Latest verified results (`DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.7 MHz):
+Latest verified results (`DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.7 MHz,
+commit `77a5864`, 2026-11-24):
 
 - Functional tests: all passed, 0 errors; 334 writes and 282 reads modeled and checked
 - Flush-resume regression (wr 5 MHz / rd 50 MHz / cfg 500 MHz): passed
@@ -47,8 +48,12 @@ Latest verified results (`DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.
 | Parameter | Default | Description |
 |---|---:|---|
 | `DW` | 8 | Data width |
-| `DEPTH` | 16 | Physical FIFO depth; power of two |
-| `ADDR_W` | `$clog2(DEPTH)` | Address width |
+| `DEPTH` | 16 | Physical FIFO depth; power of two, at least 2 |
+| `ADDR_W` | `$clog2(DEPTH)` | Address width; must equal `$clog2(DEPTH)` |
+
+Checks run at time 0: a non-power-of-two or `DEPTH < 2` fails elaboration with
+`$fatal`, a mismatched `ADDR_W` fails with `$fatal`, and `DEPTH < 4` warns because
+the 25% depth mode then degenerates.
 
 ## Ports
 
@@ -83,10 +88,10 @@ Latest verified results (`DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.
 |---:|---|---|---:|---|
 | `0` | Almost-empty threshold | R/W | `ceil(20% × DEPTH)` | Entry count; writes above `DEPTH` saturate |
 | `1` | Almost-full threshold | R/W | `ceil(80% × DEPTH)` | Entry count; writes above `DEPTH` saturate |
-| `2` | Active depth | R/W | `DEPTH` | Write selector `[1:0]`: `0`=100%, `1`=75%, `2`=50%, `3`=25%; read returns entry count |
+| `2` | Active depth | R/W | `DEPTH` | Write selector `[1:0]`: `0`=100%, `1`=75%, `2`=50%, `3`=25%; read returns the entry count from a `cfg_clk`-synchronized copy |
 | `3` | IRQ mask | R/W | `0` | `[0]` full, `[1]` empty, `[2]` almost-full, `[3]` almost-empty; `1` enables source |
 | `4` | IRQ status | R | dynamic | Bit assignment matches IRQ mask |
-| `5` | Sticky errors | R/W1C | `0` | `[0]` overflow, `[1]` underflow; write `1` to clear corresponding bit |
+| `5` | Sticky errors | R/W1C | `0` | `[0]` overflow, `[1]` underflow; write `1` to clear; ignored until the previous clear is acknowledged |
 | `6` | Write occupancy | R | `0` | Approximate entry count sampled in `cfg_clk` |
 | `7` | Read occupancy | R | `0` | Approximate entry count sampled in `cfg_clk` |
 | `8` | Flush control/status | R/W | `0` | Write `[0]=1` to request flush; read `[0]` as busy |
@@ -96,6 +101,8 @@ Latest verified results (`DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.
 Flush resets both data-domain pointers through a request/acknowledge toggle handshake. Each domain resets its pointer, holds traffic, and only then acknowledges; the acknowledge is delayed until the synchronized peer pointer reads zero, so `flush_busy` covers the whole resynchronization window. A write or read request issued during that window is dropped and sets the corresponding sticky overflow/underflow bit (clear it through address `5`). Do not issue another flush while busy; such writes are ignored. FIFO memory is not erased, but flushed entries become inaccessible.
 
 Sticky clear is a toggle request/acknowledge handshake as well. A W1C write issued while a previous clear is still in flight (acknowledge not yet returned) is ignored rather than queued, so back-to-back writes cannot drop or wedge a clear. Poll address `5` and retry if needed.
+
+A request dropped by a flush window can also set a sticky bit that no real data error caused: a dropped write sets overflow while `full` is still stale-high, and a dropped read always sets underflow because `empty` is forced during the window. Read address `5` and clear it through the same W1C path before treating the FIFO as error-free.
 
 Change active depth only while the FIFO is empty. Software must ensure the almost-full threshold is sensible for the selected active depth.
 
@@ -118,7 +125,7 @@ doc/design.md           Design and integration details
 ## Notes
 
 - `rd_data` updates on an accepted read clock edge.
-- Status and occupancy use synchronized pointers/signals; readback is intentionally approximate by synchronizer latency.
+- Status, occupancy, and active-depth readback use synchronized pointers/signals; all are intentionally approximate by synchronizer latency.
 - Apply CDC timing constraints and preserve `ASYNC_REG` chains in implementation.
 - Coverage reporting needs `verilator_coverage` on `PATH` (installed with Verilator).
 - No license file currently exists; add one before redistribution if required.
