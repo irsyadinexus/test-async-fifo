@@ -317,7 +317,7 @@ The `FORMAL` assertions are simulation/formal-only. Icarus parses them but does 
 
 - Preserve the two-stage synchronizers and reset synchronizers.
 - Apply asynchronous clock-group constraints between `wr_clk`, `rd_clk`, and `cfg_clk`.
-- Wrappers add clock groups: `pclk` (APB, one group), `hclk`/`cfg_clk`/`wr_clk`/`rd_clk` (AHB), and `aclk`/`s_axis_aclk`/`m_axis_aclk` (AXI-Stream). Constrain each pair as asynchronous.
+- Wrappers add clock groups: `pclk` (APB, one group), `hclk`/`cfg_clk`/`wr_clk`/`rd_clk` (AHB), and `aclk`/`s_axis_aclk`/`m_axis_aclk` (AXI-Stream). Constrain each pair as asynchronous. `fpga/constraints.sdc` carries a commented template per wrapper, including which clock owns each status/pointer output per MODE.
 - Treat the AHB MODE clock muxes as quasi-static: they are combinational muxes, so synthesis cannot retime across them and a live switch is unsupported.
 - Review `fpga/constraints.sdc`; adapt object paths to the synthesis tool.
 - Constrain Gray buses for skew where supported, so source bits cannot arrive more than one fast-clock period apart.
