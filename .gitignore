@@ -5,4 +5,7 @@ coverage-*.info
 coverage-annotated/
 sim/tb_hazard.vvp
 sim/tb_two.vvp
+sim/tb_apb_wrapper.vvp
+sim/tb_ahb_wrapper.vvp
+sim/tb_axis_wrapper.vvp
 sim/tb_two_fifo.vcd

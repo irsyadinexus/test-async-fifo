@@ -18,6 +18,9 @@ Synthesizable SystemVerilog asynchronous FIFO with independent write, read, and 
 - Directed, randomized, boundary, and coverage tests
 - Dedicated flush-resume CDC regression (`tb/tb_flush_hazard.sv`)
 - Two-FIFO controller-chain simulation with a dedicated clock per port (`tb/tb_two_fifo.sv`)
+- APB, AHB-Lite, and AXI-Stream/AXI4-Lite bus wrappers around the unchanged core,
+  sharing a combinational `fifo_apb_cfg` register bridge
+- Dedicated wrapper testbenches with wait-state, MODE-switch, and backpressure checks
 
 ## Quick Start
 
@@ -26,7 +29,7 @@ need `verilator_coverage` on `PATH` (it ships with Verilator).
 
 ```bash
 make lint            # RTL lint
-make iverilog        # functional + flush-hazard + two-FIFO chain (Icarus)
+make iverilog        # functional + flush-hazard + two-FIFO + 3 wrapper TBs (Icarus)
 make two-fifo        # two-FIFO controller-chain simulation (DEPTH=64) only
 make sim             # Verilator simulation + combined coverage data
 make coverage-report # separate line/toggle reports
@@ -41,6 +44,9 @@ Latest verified results (commit `a214688`, 2026-11-24). Functional tests use
   f1r 9 MHz, f2w 7 MHz, f2r 11 MHz; 100 ctl cycles between bursts): passed,
   0 errors; 512 transfers total (128 writes and 128 reads per FIFO), 256 read
   words compared, ~65 µs of simulated time; waveform in `sim/tb_two_fifo.vcd`
+- Wrapper testbenches (`make iverilog`): APB 36 pushes / 36 pops, AHB 30 writes /
+  29 reads, AXI-Stream 15 words in / 15 out, all 0 errors; APB and AHB wait states
+  measured at 7 cycles each, AXI-Stream `m_axis_tvalid` high in 10/10 cycles
 - Depth modes: 4/4
 - Almost-flag transitions: 4/4
 - Boundary cases: 4/4
@@ -101,6 +107,7 @@ the 25% depth mode then degenerates.
 | `6` | Write occupancy | R | `0` | Approximate entry count sampled in `cfg_clk` |
 | `7` | Read occupancy | R | `0` | Approximate entry count sampled in `cfg_clk` |
 | `8` | Flush control/status | R/W | `0` | Write `[0]=1` to request flush; read `[0]` as busy |
+| `9` | MODE (AHB wrapper only) | R/W | `0` | Wrapper-local, not implemented in the core (reads `0` there): `0` = AHB pushes and pops, `1` = AHB pushes with the raw read port on `rd_clk`, `2` = AHB pops with the raw write port on `wr_clk`, `3` = reserved, behaves as `0` |
 
 `irq = |(irq_status & irq_mask)`. Status sources are synchronized levels, so assertion/deassertion has CDC latency. Sticky errors do not currently feed `irq`.
 
@@ -112,7 +119,55 @@ A request dropped by a flush window can also set a sticky bit that no real data 
 
 Change active depth only while the FIFO is empty. Software must ensure the almost-full threshold is sensible for the selected active depth.
 
+Change MODE only while the affected data-domain reset is asserted: assert `wr_rst_n` and/or `rd_rst_n`, write MODE through the AHB wrapper's APB port, then release. The wrapper clock muxes are plain combinational muxes with no live-switch protection, so a mode change with running data clocks is not supported. Switch with the FIFO empty and the AHB bus idle.
+
 Configuration values are converted to Gray code in `cfg_clk`, synchronized through two registers, then decoded in the destination domain. See [doc/design.md](doc/design.md) for CDC assumptions and integration constraints.
+
+## Bus Wrappers
+
+Three wrappers drive the unchanged core. Bus data is 32 bits wide: a push takes the
+low `DW` bits of the write data, and a pop returns zero-extended data. Configuration
+registers are decoded from word offset `[5:2]`. A pop always costs one wait state
+because the core read data is registered. A push while `full` or a pop while `empty`
+stalls the transfer (no error response) rather than dropping data; since these
+wrappers own the only path that could free space, software must poll IRQ status
+(register `4`) before a transfer that could stall.
+
+| Wrapper | File | Data interface | Config interface | Clocking |
+|---|---|---|---|---|
+| APB | `rtl/fifo_apb_wrapper.sv` | one APB slave, `paddr[8]=0` register window (`0x000`–`0x03C`), `paddr[8]=1` data window (`0x100`): write = push, read = pop | same port, register window | whole core on `pclk` |
+| AHB | `rtl/fifo_ahb_wrapper.sv` | AHB-Lite slave, single data window: write = push, read = pop | separate APB slave | `hclk` for the AHB side, `cfg_clk` for config, `wr_clk`/`rd_clk` for a raw side released by MODE |
+| AXI-Stream | `rtl/fifo_axis_wrapper.sv` | `s_axis` (push) and `m_axis` (pop), independent clocks | AXI4-Lite slave on `aclk` | `s_axis_aclk`, `m_axis_aclk`, `aclk` |
+
+`rtl/fifo_apb_cfg.sv` is the shared, purely combinational APB-to-`cfg_*` bridge: one
+cycle access phase, `PREADY` constant `1`, all 16 word offsets forwarded, and the
+core ignores reserved offsets through its existing `default:` arm.
+
+APB and AHB wrappers: a data-window push completes in the single access/data phase
+while `!full`; a pop issues `rd_en`, holds `PREADY`/`HREADYOUT` low for one cycle,
+then returns the popped word. In MODE 0 the AHB engine owns both FIFO ports; in MODE
+1 the raw read port is exposed on `rd_clk` and AHB reads complete with zero data
+without popping; in MODE 2 the raw write port is exposed on `wr_clk` and AHB writes
+complete without pushing. The AHB engine relies on `full`/`empty` always coming from
+the side it currently owns, which the MODE mux guarantees.
+
+`hresetn` resets only the AHB engine (latched request and read-capture state), not the
+FIFO: a permanently stalled data phase is abandoned by asserting `hresetn`, and FIFO
+contents survive as long as `wr_rst_n`/`rd_rst_n` stay high. A single-slave system ties
+`hready` to `hreadyout`. `haddr`, `hsize`, and `htrans[0]` are ignored; only
+`HTRANS[1]` (NONSEQ/SEQ) starts a transfer, and every transfer is a full 32-bit word.
+
+AXI-Stream wrapper: `s_axis_tready = !full`, `wr_en = tvalid && tready`. The `m_axis`
+side is a two-entry output pipeline — the core's registered `rd_data` as stage 1 and a
+skid register as stage 2 — with a direct bypass, so `m_axis_tvalid` stays high on
+consecutive cycles while `tready` is high and backpressure never loses or duplicates a
+word. There is no TLAST/TKEEP/TSTRB: the FIFO carries no packet boundaries.
+
+AXI4-Lite writes latch `AW` and `W` independently and execute once both are present;
+`B` is held until `BREADY`. Reads accept one outstanding `AR`, return the
+combinational register value registered into `RDATA`, and hold `RVALID` until
+`RREADY`. Both responses are always `OKAY`; reserved offsets are forwarded and
+ignored.
 
 ## Two-FIFO Chain Simulation
 
@@ -148,10 +203,17 @@ Measured from that dump: bursts of 64 accesses spaced exactly one port clock
 ## Repository Layout
 
 ```text
-rtl/async_fifo.sv       FIFO RTL
-tb/tb_async_fifo.sv     Self-checking testbench
-tb/tb_flush_hazard.sv   Flush-resume CDC regression
-tb/tb_two_fifo.sv       Two-FIFO controller-chain simulation
+rtl/async_fifo.sv        FIFO RTL
+rtl/fifo_apb_cfg.sv      Combinational APB-to-cfg register bridge
+rtl/fifo_apb_wrapper.sv  APB slave wrapper (register window + data window)
+rtl/fifo_ahb_wrapper.sv  AHB-Lite data slave + APB config port + MODE muxing
+rtl/fifo_axis_wrapper.sv AXI-Stream (s_axis/m_axis) + AXI4-Lite config slave
+tb/tb_async_fifo.sv      Self-checking testbench
+tb/tb_flush_hazard.sv    Flush-resume CDC regression
+tb/tb_two_fifo.sv        Two-FIFO controller-chain simulation
+tb/tb_apb_wrapper.sv     APB wrapper testbench
+tb/tb_ahb_wrapper.sv     AHB wrapper testbench (includes MODE 1/2/3)
+tb/tb_axis_wrapper.sv    AXI-Stream wrapper testbench
 sim/run_iverilog.sh     Icarus runner
 sim/run_verilator.sh    Verilator coverage runner
 sim/sim_main.cpp        Verilator coverage harness

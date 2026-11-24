@@ -25,3 +25,7 @@ two-fifo:
 
 lint:
 	verilator --lint-only -Wall -Wno-fatal -Irtl rtl/async_fifo.sv
+	verilator --lint-only -Wall -Wno-fatal -Irtl rtl/fifo_apb_cfg.sv
+	verilator --lint-only -Wall -Wno-fatal -Irtl rtl/fifo_apb_wrapper.sv
+	verilator --lint-only -Wall -Wno-fatal -Irtl rtl/fifo_ahb_wrapper.sv
+	verilator --lint-only -Wall -Wno-fatal -Irtl rtl/fifo_axis_wrapper.sv
