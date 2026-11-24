@@ -345,7 +345,7 @@ iverilog -g2012 -o sim/tb_ahb_wrapper.vvp -I rtl rtl/async_fifo.sv \
 # AXI-Stream: s_axis/m_axis + AXI4-Lite config
 iverilog -g2012 -o sim/tb_axis_wrapper.vvp -I rtl rtl/async_fifo.sv \
   rtl/fifo_axis_wrapper.sv tb/tb_axis_wrapper.sv
-vvp sim/tb_apb_wrapper.vvp     # same for tb_ahb_wrapper / tb_axis_wrapper
+for v in apb ahb axis; do vvp sim/tb_${v}_wrapper.vvp; done
 ```
 
 A wrapper test at a stall (push while `full`, pop while `empty`) is abandoned at

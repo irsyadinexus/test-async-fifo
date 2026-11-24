@@ -295,6 +295,22 @@ make coverage-report
 
 `make iverilog` runs six programs: the main testbench, the flush-hazard regression, the two-FIFO chain, and the three wrapper testbenches. The flush-hazard regression (`tb/tb_flush_hazard.sv`) fixes a 5 MHz / 50 MHz / 500 MHz clock ratio that makes the flush window large enough for the pre-fix wedge to appear. Verilator coverage keeps the main testbench as its single top, so the wrapper and flush-hazard sources are Icarus-only.
 
+Build one wrapper testbench on its own with its exact source list:
+
+```bash
+iverilog -g2012 -o sim/tb_apb_wrapper.vvp -I rtl rtl/async_fifo.sv \
+  rtl/fifo_apb_cfg.sv rtl/fifo_apb_wrapper.sv tb/tb_apb_wrapper.sv
+iverilog -g2012 -o sim/tb_ahb_wrapper.vvp -I rtl rtl/async_fifo.sv \
+  rtl/fifo_apb_cfg.sv rtl/fifo_ahb_wrapper.sv tb/tb_ahb_wrapper.sv
+iverilog -g2012 -o sim/tb_axis_wrapper.vvp -I rtl rtl/async_fifo.sv \
+  rtl/fifo_axis_wrapper.sv tb/tb_axis_wrapper.sv
+for v in apb ahb axis; do vvp sim/tb_${v}_wrapper.vvp; done
+```
+
+Every wrapper program needs `rtl/async_fifo.sv` plus its own wrapper file; the APB
+and AHB programs also need the shared `rtl/fifo_apb_cfg.sv` bridge. The `sim/*.vvp`
+outputs are git-ignored.
+
 The `FORMAL` assertions are simulation/formal-only. Icarus parses them but does not implement concurrent assertions, so use `iverilog -g2012 -gsupported-assertions -DFORMAL` to syntax-check that variant; Verilator accepts it under `--assert`.
 
 ## Synthesis and Timing
