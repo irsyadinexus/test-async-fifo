@@ -392,11 +392,12 @@ doc/design.md            Design and integration details
 - Assert every domain's reset together at power-up. A reset of only one data domain
   leaves that pointer pair inconsistent with its peer, so do not expect FIFO contents
   to survive it.
-- A transfer issued while a reset is still releasing can be accepted by the wrapper
-  but dropped by the core, because `do_write`/`do_read` require the core's
-  synchronized reset. The AXI-Stream side gates `tready` and the pop request with its
-  local release synchronizer; on APB and AHB, keep the master idle for two clock
-  cycles after reset release before the first transfer.
+- A push issued while a reset is still releasing is accepted by the wrapper but
+  dropped by the core: `full` already reads low while `do_write` is still gated off by
+  the synchronized write reset. A pop stalls instead, because `empty` reads high. The
+  AXI-Stream side gates `tready` and the pop request with its local release
+  synchronizer; on APB and AHB, keep the master idle for two clock cycles after reset
+  release before the first transfer.
 - Coverage reporting needs `verilator_coverage` on `PATH`; it is not part of every Verilator package.
 - No license file currently exists; add one before redistribution if required.
 

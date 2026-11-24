@@ -30,6 +30,37 @@ Configuration registers reset to:
 
 System integration should normally assert all three resets together. Do not retain FIFO contents across a reset of only one data domain.
 
+The bus wrappers fan their reset pins out to these domains:
+
+| Wrapper | Pin | Resets |
+|---|---|---|
+| APB | `presetn` | FIFO write, read, and config domains, plus the wrapper's pop state machine |
+| AHB | `hresetn` | The AHB engine only (latched request, read capture, `addr_valid` gating) |
+| AHB | `cfg_presetn` | Config domain: core `cfg_rst_n` and the MODE register |
+| AHB | `wr_rst_n` / `rd_rst_n` | The raw write / read side, driven only in MODE 2 / MODE 1 |
+| AXI-Stream | `aresetn` | Config domain, plus the wrapper's AXI4-Lite reset synchronizer |
+| AXI-Stream | `s_axis_aresetn` / `m_axis_aresetn` | FIFO write / read side, plus that domain's stream and pipeline reset synchronizers |
+
+Each pin asserts asynchronously. Release is synchronous in the domain the pin resets:
+either a wrapper-local two-stage synchronizer (AXI-Stream config and both stream
+domains) or the core's internal synchronizer, or, for pure hclk/cfg_clk wrapper
+flops, the first rising edge after the pin is released.
+
+A push issued while a reset is still releasing is accepted by the wrapper and dropped
+by the core. The wrapper sees `full` low (both pointers are cleared) and completes the
+transfer, while `do_write` is still gated off by the core's synchronized write reset,
+so the word is lost. Pops are not exposed the same way: `empty` reads high during the
+window because the pointers are equal, so a pop stalls instead of completing. The
+AXI-Stream wrapper avoids the push case by gating `s_axis_tready` and the pop request
+with its own release synchronizer; on the APB and AHB wrappers the master must stay
+idle for two clock cycles after a reset release before the first transfer. The AHB
+engine reset (`hresetn`) does not touch the FIFO, so leaving the FIFO resets released
+does not protect against this.
+
+Releasing one data domain while the other keeps running is invalid for the same
+reason: the pointer pair is no longer consistent, and `empty`/`full` can report
+values that let a wrapper complete transfers the core then drops.
+
 ## Full and Empty
 
 The read domain declares `empty` when its local read Gray pointer equals the synchronized write Gray pointer.
@@ -355,8 +386,6 @@ wrapper (MODE).
   path in the write domain; do not pipeline it into the read domain.
 - The wrappers add no new Gray buses, so the skew rule above is unchanged, and the
   pointer outputs they expose are already the core's two-stage synchronized copies.
-- Reset mapping: APB `presetn` covers all three core domains; AHB `hresetn` resets
-  the AHB engine only, with `cfg_presetn` for config and `wr_rst_n`/`rd_rst_n` for
-  the raw sides; AXI-Stream uses `aresetn`, `s_axis_aresetn`, and `m_axis_aresetn`
-  for config, write, and read. Each is asynchronous-assert with a per-domain
-  synchronized release, so false-path each reset port.
+- False-path every wrapper reset pin: each one asserts asynchronously and releases
+  synchronously in the domain it resets. The pin-to-domain map is in
+  [Reset](#reset).
