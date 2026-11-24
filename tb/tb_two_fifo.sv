@@ -21,7 +21,7 @@ module tb_two_fifo;
 
   // --- Parameters ---
   localparam int DW     = 8;
-  localparam int DEPTH  = 16;
+  localparam int DEPTH  = 64;
   localparam int ADDR_W = $clog2(DEPTH);
   localparam int PTR_W  = ADDR_W + 1;
 

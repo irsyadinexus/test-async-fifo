@@ -26,6 +26,7 @@ need `verilator_coverage` on `PATH` (it ships with Verilator).
 ```bash
 make lint            # RTL lint
 make iverilog        # functional simulation + flush-resume regression (Icarus)
+make two-fifo        # two-FIFO controller-chain simulation only (Icarus)
 make sim             # Verilator simulation + combined coverage data
 make coverage-report # separate line/toggle reports
 ```

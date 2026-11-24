@@ -1,4 +1,4 @@
-.PHONY: sim coverage coverage-line coverage-toggle coverage-report iverilog lint
+.PHONY: sim coverage coverage-line coverage-toggle coverage-report iverilog two-fifo lint
 
 sim:
 	bash sim/run_verilator.sh
@@ -19,6 +19,9 @@ coverage-report: coverage-line coverage-toggle
 
 iverilog:
 	bash sim/run_iverilog.sh
+
+two-fifo:
+	bash sim/run_iverilog.sh two-fifo
 
 lint:
 	verilator --lint-only -Wall -Wno-fatal -Irtl rtl/async_fifo.sv
