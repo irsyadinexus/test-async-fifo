@@ -312,6 +312,48 @@ Measured from that dump: bursts of 64 accesses spaced exactly one port clock
 (f1w 76.92 ns, f1r 111.11 ns, f2w 142.86 ns, f2r 90.91 ns), burst boundaries
 ≥ 1.1 µs apart.
 
+## Verification
+
+Six Icarus programs plus the Verilator flow. Every program is self-checking: it
+compares against queues or scoreboards, counts errors, and carries a timeout
+watchdog that reports `TIMEOUT`. The functional and wrapper programs end with
+`*** ALL TESTS PASSED ***` (or `*** TESTS FAILED ***`) plus an `Errors:` total; the
+two dedicated regressions print `*** FLUSH HAZARD TEST PASSED ***` and
+`*** TWO-FIFO CHAIN TEST PASSED ***`.
+
+| Testbench | Covers |
+|---|---|
+| `tb/tb_async_fifo.sv` | reset, fill/drain boundaries, simultaneous asynchronous traffic, randomized traffic against a scoreboard, programmable thresholds, all four depth modes, IRQ status and mask, sticky errors and W1C, occupancy and configuration readback, flush handshake |
+| `tb/tb_flush_hazard.sv` | flush-resume CDC wedge at a 5 MHz / 50 MHz / 500 MHz clock ratio |
+| `tb/tb_two_fifo.sv` | two FIFOs with a dedicated clock per port, burst chains with 100-cycle gaps, expected-data queues |
+| `tb/tb_apb_wrapper.sv` | register reset values and readback, reserved offset 9, data-window round trip, push-while-full and pop-while-empty wait states, IRQ through the mask |
+| `tb/tb_ahb_wrapper.sv` | MODE 0 round trip, write/read wait states with FIFO contents preserved across an engine reset, MODE 1 raw read side, MODE 2 raw write side, MODE 3 behaving as 0 |
+| `tb/tb_axis_wrapper.sv` | cross-clock 32-word ordering, 50-cycle mid-stream backpressure, fill-to-full and drain-to-empty, 10/10-cycle `m_axis_tvalid` throughput, AXI4-Lite readback, IRQ |
+
+`make iverilog` runs all six; `make sim` builds only `tb/tb_async_fifo.sv` under
+Verilator, with coverage. Measured results are in [Quick Start](#quick-start).
+
+The wrapper testbenches run at `DW=8`, `DEPTH=16` and can be built individually:
+
+```bash
+# APB: register window + data window
+iverilog -g2012 -o sim/tb_apb_wrapper.vvp -I rtl rtl/async_fifo.sv \
+  rtl/fifo_apb_cfg.sv rtl/fifo_apb_wrapper.sv tb/tb_apb_wrapper.sv
+# AHB: AHB-Lite data slave + APB config port + MODE 1/2/3
+iverilog -g2012 -o sim/tb_ahb_wrapper.vvp -I rtl rtl/async_fifo.sv \
+  rtl/fifo_apb_cfg.sv rtl/fifo_ahb_wrapper.sv tb/tb_ahb_wrapper.sv
+# AXI-Stream: s_axis/m_axis + AXI4-Lite config
+iverilog -g2012 -o sim/tb_axis_wrapper.vvp -I rtl rtl/async_fifo.sv \
+  rtl/fifo_axis_wrapper.sv tb/tb_axis_wrapper.sv
+vvp sim/tb_apb_wrapper.vvp     # same for tb_ahb_wrapper / tb_axis_wrapper
+```
+
+A wrapper test at a stall (push while `full`, pop while `empty`) is abandoned at
+test level: the APB and AXI-Stream testbenches deassert `PSEL`/`TVALID`, and the AHB
+testbench pulses `hresetn`, which resets only the AHB engine so the FIFO contents
+survive the abort. See [Bus Wrappers](#bus-wrappers) for the software rule these
+tests are working around.
+
 ## Repository Layout
 
 ```text
