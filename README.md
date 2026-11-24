@@ -32,15 +32,15 @@ make sim             # Verilator simulation + combined coverage data
 make coverage-report # separate line/toggle reports
 ```
 
-Latest verified results (commit `be1ebdd`, 2026-11-24). Functional tests use
+Latest verified results (commit `a214688`, 2026-11-24). Functional tests use
 `DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.7 MHz:
 
 - Functional tests: all passed, 0 errors; 334 writes and 282 reads modeled and checked
 - Flush-resume regression (wr 5 MHz / rd 50 MHz / cfg 500 MHz): passed
-- Two-FIFO chain (`DEPTH=64`, 64-word bursts, ctl 12 ns / f1w 10 ns /
-  f1r 13 ns / f2w 21 ns / f2r 9 ns, 100 ctl cycles between bursts): passed,
+- Two-FIFO chain (`DEPTH=64`, 64-word bursts; ctl 100 MHz, f1w 13 MHz,
+  f1r 9 MHz, f2w 7 MHz, f2r 11 MHz; 100 ctl cycles between bursts): passed,
   0 errors; 512 transfers total (128 writes and 128 reads per FIFO), 256 read
-  words compared, ~16 µs of simulated time; waveform in `sim/tb_two_fifo.vcd`
+  words compared, ~65 µs of simulated time; waveform in `sim/tb_two_fifo.vcd`
 - Depth modes: 4/4
 - Almost-flag transitions: 4/4
 - Boundary cases: 4/4
@@ -120,15 +120,15 @@ Configuration values are converted to Gray code in `cfg_clk`, synchronized throu
 behavioral controller. Every FIFO port runs on its own clock, so both DUTs' Gray
 CDC is exercised. Each FIFO is accessed in back-to-back bursts: every word in a
 burst is transferred on consecutive target-port cycles, and the controller waits
-100 `ctl_clk` cycles (1.2 µs) between a completed burst of writes and the
+100 `ctl_clk` cycles (1 µs at 100 MHz) between a completed burst of writes and the
 following burst of reads, or a completed burst of reads and the following burst
 of writes.
 
 ```mermaid
 flowchart LR
-    C["Controller<br/>ctl_clk 12 ns<br/>100 ctl cycles between bursts"]
-    F1["FIFO1 — async_fifo, DEPTH=64<br/>wr f1w 10 ns, rd f1r 13 ns"]
-    F2["FIFO2 — async_fifo, DEPTH=64<br/>wr f2w 21 ns, rd f2r 9 ns"]
+    C["Controller<br/>ctl_clk 10 ns (100 MHz)<br/>100 ctl cycles between bursts"]
+    F1["FIFO1 — async_fifo, DEPTH=64<br/>wr f1w 76.9 ns (13 MHz), rd f1r 111.1 ns (9 MHz)"]
+    F2["FIFO2 — async_fifo, DEPTH=64<br/>wr f2w 142.9 ns (7 MHz), rd f2r 90.9 ns (11 MHz)"]
     C -->|"write: phases 1, 5"| F1
     F1 -->|"read: phases 2, 6"| C
     C -->|"write: phases 2, 4"| F2
@@ -142,7 +142,8 @@ FIFO1, phase 6 reads FIFO1 back. Every read word is compared against the
 `exp1`/`exp2` expected-data queues; phase 7 checks both DUTs are empty with
 balanced pointers. The run dumps full-depth waveforms to `sim/tb_two_fifo.vcd`.
 Measured from that dump: bursts of 64 accesses spaced exactly one port clock
-(f1w 10 ns, f1r 13 ns, f2w 21 ns, f2r 9 ns), burst boundaries ≥ 1.2 µs apart.
+(f1w 76.92 ns, f1r 111.11 ns, f2w 142.86 ns, f2r 90.91 ns), burst boundaries
+≥ 1.1 µs apart.
 
 ## Repository Layout
 
