@@ -17,6 +17,7 @@ Synthesizable SystemVerilog asynchronous FIFO with independent write, read, and 
 - Cross-domain flush command with busy handshake and pointer-resynchronization gating
 - Directed, randomized, boundary, and coverage tests
 - Dedicated flush-resume CDC regression (`tb/tb_flush_hazard.sv`)
+- Two-FIFO controller-chain simulation with a dedicated clock per port (`tb/tb_two_fifo.sv`)
 
 ## Quick Start
 
@@ -31,7 +32,7 @@ make sim             # Verilator simulation + combined coverage data
 make coverage-report # separate line/toggle reports
 ```
 
-Latest verified results (commit `8aed8ea`, 2026-11-24). Functional tests use
+Latest verified results (commit `be1ebdd`, 2026-11-24). Functional tests use
 `DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.7 MHz:
 
 - Functional tests: all passed, 0 errors; 334 writes and 282 reads modeled and checked
