@@ -113,6 +113,29 @@ Change active depth only while the FIFO is empty. Software must ensure the almos
 
 Configuration values are converted to Gray code in `cfg_clk`, synchronized through two registers, then decoded in the destination domain. See [doc/design.md](doc/design.md) for CDC assumptions and integration constraints.
 
+## Two-FIFO Chain Simulation
+
+`tb/tb_two_fifo.sv` (`make two-fifo`) instantiates two `async_fifo` DUTs and one
+behavioral controller. Every FIFO port runs on its own clock, so both DUTs' Gray
+CDC is exercised; the controller waits 100 `ctl_clk` cycles before each access.
+
+```mermaid
+flowchart LR
+    C["Controller<br/>ctl_clk 12 ns<br/>100 ctl cycles before every write/read"]
+    F1["FIFO1 — async_fifo, DEPTH=64<br/>wr f1w 10 ns, rd f1r 13 ns"]
+    F2["FIFO2 — async_fifo, DEPTH=64<br/>wr f2w 21 ns, rd f2r 9 ns"]
+    C -->|"write: phases 1, 5"| F1
+    F1 -->|"read: phases 2, 6"| C
+    C -->|"write: phases 2, 4"| F2
+    F2 -->|"read: phases 3, 5"| C
+```
+
+Phase 1 fills FIFO1 with random words, phase 2 moves them into FIFO2, phase 3
+reads FIFO2 back. Phase 4 fills FIFO2 with ascending words, phase 5 moves them
+into FIFO1, phase 6 reads FIFO1 back. Every transferred word is compared against
+the `exp1`/`exp2` expected-data queues; phase 7 checks both DUTs are empty with
+balanced pointers. The run dumps full-depth waveforms to `sim/tb_two_fifo.vcd`.
+
 ## Repository Layout
 
 ```text
