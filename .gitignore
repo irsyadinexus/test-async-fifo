@@ -4,3 +4,5 @@ coverage.dat
 coverage-*.info
 coverage-annotated/
 sim/tb_hazard.vvp
+sim/tb_two.vvp
+sim/tb_two_fifo.vcd

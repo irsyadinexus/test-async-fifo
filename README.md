@@ -114,6 +114,7 @@ Configuration values are converted to Gray code in `cfg_clk`, synchronized throu
 rtl/async_fifo.sv       FIFO RTL
 tb/tb_async_fifo.sv     Self-checking testbench
 tb/tb_flush_hazard.sv   Flush-resume CDC regression
+tb/tb_two_fifo.sv       Two-FIFO controller-chain simulation
 sim/run_iverilog.sh     Icarus runner
 sim/run_verilator.sh    Verilator coverage runner
 sim/sim_main.cpp        Verilator coverage harness
