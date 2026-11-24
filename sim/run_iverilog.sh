@@ -9,6 +9,7 @@ RTL_DIR="$PROJ_DIR/rtl"
 TB_DIR="$PROJ_DIR/tb"
 OUT="$SCRIPT_DIR/tb_out.vvp"
 OUT2="$SCRIPT_DIR/tb_hazard.vvp"
+OUT3="$SCRIPT_DIR/tb_two.vvp"
 
 echo "[INFO] Compiling with Icarus Verilog..."
 iverilog -g2012 -o "$OUT" \
@@ -27,5 +28,14 @@ iverilog -g2012 -o "$OUT2" \
 
 echo "[INFO] Running flush-hazard regression..."
 vvp "$OUT2"
+
+echo "[INFO] Compiling two-FIFO chain simulation with Icarus Verilog..."
+iverilog -g2012 -o "$OUT3" \
+  -I "$RTL_DIR" \
+  "$RTL_DIR/async_fifo.sv" \
+  "$TB_DIR/tb_two_fifo.sv"
+
+echo "[INFO] Running two-FIFO chain simulation..."
+vvp "$OUT3"
 
 echo "[INFO] Done."
