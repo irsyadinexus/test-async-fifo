@@ -381,6 +381,22 @@ doc/design.md            Design and integration details
 - `rd_data` updates on an accepted read clock edge.
 - Status, occupancy, and active-depth readback use synchronized pointers/signals; all are intentionally approximate by synchronizer latency.
 - Apply CDC timing constraints and preserve `ASYNC_REG` chains in implementation.
+- Wrapper resets map per core domain: APB `presetn` resets the FIFO write, read, and
+  config domains; AHB `hresetn` resets the AHB engine only, with `cfg_presetn` for
+  config and `wr_rst_n`/`rd_rst_n` for the released raw sides (see
+  [Bus Wrappers](#bus-wrappers)); AXI-Stream uses `aresetn`,
+  `s_axis_aresetn`, and `m_axis_aresetn` for config, write, and read. Every wrapper
+  reset asserts asynchronously and releases through a two-stage synchronizer in the
+  domain it resets; the AXI-Stream wrapper adds its own release synchronizers for
+  the config and both stream domains.
+- Assert every domain's reset together at power-up. A reset of only one data domain
+  leaves that pointer pair inconsistent with its peer, so do not expect FIFO contents
+  to survive it.
+- A transfer issued while a reset is still releasing can be accepted by the wrapper
+  but dropped by the core, because `do_write`/`do_read` require the core's
+  synchronized reset. The AXI-Stream side gates `tready` and the pop request with its
+  local release synchronizer; on APB and AHB, keep the master idle for two clock
+  cycles after reset release before the first transfer.
 - Coverage reporting needs `verilator_coverage` on `PATH`; it is not part of every Verilator package.
 - No license file currently exists; add one before redistribution if required.
 
