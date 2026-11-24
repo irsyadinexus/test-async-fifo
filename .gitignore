@@ -3,3 +3,4 @@ sim/tb_out.vvp
 coverage.dat
 coverage-*.info
 coverage-annotated/
+sim/tb_hazard.vvp

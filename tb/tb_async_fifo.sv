@@ -13,7 +13,7 @@
 //
 // Usage (Icarus Verilog):
 //   iverilog -g2012 -o sim/tb_out -I rtl \
-//     rtl/async_fifo_pkg.sv rtl/async_fifo.sv tb/tb_async_fifo.sv
+//     rtl/async_fifo.sv tb/tb_async_fifo.sv
 //   vvp sim/tb_out
 //
 // Usage (Verilator):
@@ -24,16 +24,14 @@
 
 module tb_async_fifo;
 
-  import async_fifo_pkg::*;
-
   // --- Parameters ---
   localparam int DW    = 8;
   localparam int DEPTH = 16;
   localparam int ADDR_W = $clog2(DEPTH);
 
   // --- DUT signals ---
-  logic                  wr_clk, rd_clk;
-  logic                  wr_rst_n, rd_rst_n;
+  logic                  wr_clk, rd_clk, cfg_clk;
+  logic                  wr_rst_n, rd_rst_n, cfg_rst_n;
   logic                  wr_en, rd_en;
   logic  [DW-1:0]        wr_data, rd_data;
   logic                  full, empty;
@@ -57,8 +55,8 @@ module tb_async_fifo;
     .rd_en            (rd_en),
     .rd_data          (rd_data),
     .empty            (empty),
-    .cfg_clk          (wr_clk),
-    .cfg_rst_n        (wr_rst_n),
+    .cfg_clk          (cfg_clk),
+    .cfg_rst_n        (cfg_rst_n),
     .cfg_we           (cfg_we),
     .cfg_re           (cfg_re),
     .cfg_addr         (cfg_addr),
@@ -67,8 +65,8 @@ module tb_async_fifo;
     .irq              (irq),
     .almost_empty     (almost_empty),
     .almost_full      (almost_full),
-    .wr_ptr_gray_sync (),
-    .rd_ptr_gray_sync ()
+    .wr_ptr_gray_sync (wr_ptr_gray_sync),
+    .rd_ptr_gray_sync (rd_ptr_gray_sync)
   );
 
   // -----------------------------------------------------------------------
@@ -81,6 +79,10 @@ module tb_async_fifo;
   // Read clock: 62.5 MHz (16 ns period) — non-harmonic
   initial rd_clk = 0;
   always #8 rd_clk = ~rd_clk;
+
+  // Config clock: 166.7 MHz (6 ns period) — non-harmonic with both data clocks
+  initial cfg_clk = 0;
+  always #3 cfg_clk = ~cfg_clk;
 
   // -----------------------------------------------------------------------
   // Scoreboard / reference model
@@ -103,6 +105,7 @@ module tb_async_fifo;
     begin
       wr_rst_n = 0;
       rd_rst_n = 0;
+      cfg_rst_n = 0;
       wr_en    = 0;
       rd_en    = 0;
       wr_data  = 0;
@@ -118,6 +121,7 @@ module tb_async_fifo;
       @(posedge rd_clk);
       wr_rst_n = 1;
       rd_rst_n = 1;
+      cfg_rst_n = 1;
       @(posedge wr_clk);
       @(posedge rd_clk);
     end
@@ -126,11 +130,11 @@ module tb_async_fifo;
   task automatic cfg_write(input logic [3:0] addr,
                            input logic [ADDR_W:0] data);
     begin
-      @(negedge wr_clk);
+      @(negedge cfg_clk);
       cfg_addr = addr;
       cfg_wdata = data;
       cfg_we = 1;
-      @(negedge wr_clk);
+      @(negedge cfg_clk);
       cfg_we = 0;
       repeat (4) @(posedge wr_clk);
       repeat (4) @(posedge rd_clk);
@@ -140,12 +144,25 @@ module tb_async_fifo;
   task automatic cfg_read(input logic [3:0] addr,
                           output logic [ADDR_W:0] data);
     begin
-      @(negedge wr_clk);
+      @(negedge cfg_clk);
       cfg_addr = addr;
       cfg_re = 1;
       #1 data = cfg_rdata;
-      @(negedge wr_clk);
+      @(negedge cfg_clk);
       cfg_re = 0;
+    end
+  endtask
+
+  // Two cfg writes on consecutive cfg_clk cycles: the second one reaches the
+  // decode while the first clear request is still in flight.
+  task automatic cfg_double_write(input logic [3:0] addr,
+                                 input logic [ADDR_W:0] data);
+    begin
+      @(negedge cfg_clk);
+      cfg_addr = addr; cfg_wdata = data; cfg_we = 1;
+      @(negedge cfg_clk);
+      @(negedge cfg_clk);
+      cfg_we = 0;
     end
   endtask
 
@@ -190,6 +207,20 @@ module tb_async_fifo;
       cfg_read(5, data);
       if (data[0]) begin $error("FAIL: overflow W1C"); errors++; end
 
+      // Re-set the sticky bit, then clear it with two back-to-back W1C writes.
+      // The second write must be ignored (ack not yet returned) and must not
+      // wedge the toggle handshake.
+      @(negedge wr_clk); wr_en = 1;
+      @(negedge wr_clk); wr_en = 0;
+      repeat (4) @(posedge wr_clk);
+      cfg_read(5, data);
+      if (!data[0]) begin $error("FAIL: overflow sticky not re-set"); errors++; end
+      cfg_double_write(5, 1);
+      repeat (20) @(posedge wr_clk);
+      repeat (4) @(posedge cfg_clk);
+      cfg_read(5, data);
+      if (data[0]) begin $error("FAIL: back-to-back overflow W1C left sticky set"); errors++; end
+
       do_reset;
       repeat (3) @(posedge rd_clk);
       @(negedge rd_clk); rd_en = 1;
@@ -202,6 +233,17 @@ module tb_async_fifo;
       repeat (4) @(posedge rd_clk);
       cfg_read(5, data);
       if (data[1]) begin $error("FAIL: underflow W1C"); errors++; end
+
+      @(negedge rd_clk); rd_en = 1;
+      @(negedge rd_clk); rd_en = 0;
+      repeat (4) @(posedge rd_clk);
+      cfg_read(5, data);
+      if (!data[1]) begin $error("FAIL: underflow sticky not re-set"); errors++; end
+      cfg_double_write(5, 2);
+      repeat (20) @(posedge rd_clk);
+      repeat (4) @(posedge cfg_clk);
+      cfg_read(5, data);
+      if (data[1]) begin $error("FAIL: back-to-back underflow W1C left sticky set"); errors++; end
     end
   endtask
 
@@ -265,17 +307,21 @@ module tb_async_fifo;
       $display("=== Flush command and busy ===");
       do_reset;
       for (i = 0; i < 6; i++) do_write(DW'(i));
-      @(negedge wr_clk);
+      @(negedge cfg_clk);
       cfg_addr = 8; cfg_wdata = 1; cfg_we = 1;
-      @(negedge wr_clk);
+      @(negedge cfg_clk);
       cfg_we = 0; cfg_re = 1;
       #1 data = cfg_rdata;
       if (!data[0]) begin $error("FAIL: flush busy did not assert"); errors++; end
-      while (cfg_rdata[0]) @(negedge wr_clk);
+      while (cfg_rdata[0]) begin @(negedge cfg_clk); #1; end
       cfg_re = 0;
       repeat (4) @(posedge rd_clk);
       if (!empty || dut.wr_ptr_bin != 0 || dut.rd_ptr_bin != 0) begin
         $error("FAIL: flush did not empty FIFO"); errors++;
+      end
+      if (wr_ptr_gray_sync !== '0 || rd_ptr_gray_sync !== '0) begin
+        $error("FAIL: pointer status outputs not cleared by flush");
+        errors++;
       end
       cfg_read(8, data);
       if (data[0]) begin $error("FAIL: flush busy did not clear"); errors++; end
@@ -331,6 +377,7 @@ module tb_async_fifo;
   task automatic test_boundaries;
     logic [ADDR_W:0] saved_ae;
     logic [ADDR_W:0] saved_wr_ptr;
+    logic [ADDR_W:0] data;
     begin
       $display("=== Configuration and access boundaries ===");
       do_reset;
@@ -339,10 +386,15 @@ module tb_async_fifo;
       if (dut.ae_threshold == DEPTH) boundary_coverage[0] = 1;
       else begin $error("FAIL: AE threshold did not saturate"); errors++; end
 
+      // Reserved addresses (4, 7, 9-15) must ignore writes and read back zero.
       saved_ae = dut.ae_threshold;
-      cfg_write(3, 0);
-      if (dut.ae_threshold == saved_ae) boundary_coverage[1] = 1;
-      else begin $error("FAIL: invalid cfg address changed state"); errors++; end
+      cfg_write(4'd12, {ADDR_W+1{1'b1}});
+      cfg_read(4'd12, data);
+      if (dut.ae_threshold == saved_ae && data == '0) boundary_coverage[1] = 1;
+      else begin
+        $error("FAIL: reserved cfg address changed state or read back %0h", data);
+        errors++;
+      end
 
       cfg_write(2, 3); // quarter depth
       repeat (DEPTH/4) do_write(DW'($urandom));
@@ -364,13 +416,15 @@ module tb_async_fifo;
   // Write task
   // -----------------------------------------------------------------------
   task automatic do_write(input [DW-1:0] data);
+    bit accepted;
     begin
       @(negedge wr_clk);
-      wr_en   = 1;
-      wr_data = data;
+      accepted = !full;
+      wr_en    = 1;
+      wr_data  = data;
       @(posedge wr_clk);
       #1 wr_en = 0;
-      if (!full) begin
+      if (accepted) begin
         ref_mem.push_back(data);
         wr_count++;
       end
@@ -388,16 +442,11 @@ module tb_async_fifo;
       rd_en = 1;
       @(posedge rd_clk);
       #1 rd_en = 0;
-      if (!empty) begin
-        expected = ref_mem.pop_front();
-        rd_count++;
-        // Data appears on next clock due to registered read
-        @(posedge rd_clk);
-        #1;
-        if (rd_data !== expected) begin
-          $error("MISMATCH: got %0d, expected %0d", rd_data, expected);
-          errors++;
-        end
+      expected = ref_mem.pop_front();
+      rd_count++;
+      if (rd_data !== expected) begin
+        $error("MISMATCH: got %0d, expected %0d", rd_data, expected);
+        errors++;
       end
     end
   endtask
@@ -467,6 +516,7 @@ module tb_async_fifo;
   // -----------------------------------------------------------------------
   task test_simultaneous_rw;
     int i;
+    logic [DW-1:0] expected;
     begin
       $display("=== Test 4: Simultaneous R/W ===");
       for (i = 0; i < DEPTH*4; i++) begin
@@ -493,15 +543,17 @@ module tb_async_fifo;
               // Data valid next cycle (registered read)
               @(posedge rd_clk);
               #1;
-              if (ref_mem.size() > 0) begin
-                logic [DW-1:0] expected;
+              if (ref_mem.size() == 0) begin
+                $error("MODEL UNDERFLOW: DUT read with empty model");
+                errors++;
+              end else begin
                 expected = ref_mem.pop_front();
                 if (rd_data !== expected) begin
                   $error("R/W MISMATCH: got %0d, expected %0d", rd_data, expected);
                   errors++;
                 end
-                rd_count++;
               end
+              rd_count++;
             end
           end
         join
@@ -516,6 +568,7 @@ module tb_async_fifo;
   task test_random_stress;
     int i;
     logic op;
+    logic [DW-1:0] expected;
     begin
       $display("=== Test 5: Random stress ===");
       for (i = 0; i < DEPTH*20; i++) begin
@@ -536,15 +589,17 @@ module tb_async_fifo;
           // Data valid next cycle (registered read)
           @(posedge rd_clk);
           #1;
-          if (ref_mem.size() > 0) begin
-            logic [DW-1:0] expected;
+          if (ref_mem.size() == 0) begin
+            $error("MODEL UNDERFLOW: DUT read with empty model");
+            errors++;
+          end else begin
             expected = ref_mem.pop_front();
             if (rd_data !== expected) begin
               $error("STRESS MISMATCH: got %0d, expected %0d", rd_data, expected);
               errors++;
             end
-            rd_count++;
           end
+          rd_count++;
         end
         // Random small delay
         #(i % 3 * 2);

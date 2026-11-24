@@ -20,7 +20,6 @@ esac
 verilator --cc --exe --build --timing "$COVERAGE_FLAG" \
   -Wno-fatal \
   -I"$RTL_DIR" \
-  "$RTL_DIR/async_fifo_pkg.sv" \
   "$RTL_DIR/async_fifo.sv" \
   "$TB_DIR/tb_async_fifo.sv" \
   "$SCRIPT_DIR/sim_main.cpp" \

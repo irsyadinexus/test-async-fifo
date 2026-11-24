@@ -21,4 +21,4 @@ iverilog:
 	bash sim/run_iverilog.sh
 
 lint:
-	verilator --lint-only -Wall -Wno-fatal -Irtl rtl/async_fifo_pkg.sv rtl/async_fifo.sv
+	verilator --lint-only -Wall -Wno-fatal -Irtl rtl/async_fifo.sv

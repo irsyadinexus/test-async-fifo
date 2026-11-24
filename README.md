@@ -12,14 +12,16 @@ Synthesizable SystemVerilog asynchronous FIFO with independent write/read clocks
 - Runtime active depth: 100%, 75%, 50%, or 25% of `DEPTH`
 - Gray-encoded configuration CDC
 - Maskable level interrupt for full, empty, almost-full, and almost-empty
-- Sticky overflow/underflow status with write-one-to-clear
+- Sticky overflow/underflow status with acknowledged write-one-to-clear
 - Configuration and approximate occupancy readback
-- Cross-domain flush command with busy handshake
+- Cross-domain flush command with busy handshake and pointer-resynchronization gating
 - Directed, randomized, boundary, and coverage tests
+- Dedicated flush-resume CDC regression (`tb/tb_flush_hazard.sv`)
 
 ## Quick Start
 
-Requirements: Icarus Verilog and/or Verilator.
+Requirements: Icarus Verilog and/or Verilator. The coverage targets additionally
+need `verilator_coverage` on `PATH` (it ships with Verilator).
 
 ```bash
 make lint       # RTL lint
@@ -28,14 +30,17 @@ make sim        # Verilator simulation + combined coverage data
 make coverage-report  # separate line/toggle reports
 ```
 
-Latest verified results (`DW=8`, `DEPTH=16`):
+Latest verified results (`DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.7 MHz):
 
-- Functional tests: all passed, 0 errors
+- Functional tests: all passed, 0 errors; 334 writes and 282 reads modeled and checked
+- Flush-resume regression (wr 5 MHz / rd 50 MHz / cfg 500 MHz): passed
 - Depth modes: 4/4
 - Almost-flag transitions: 4/4
 - Boundary cases: 4/4
-- Line coverage: 97.8% (315/322)
-- Toggle coverage: 89.3% (50/56)
+- Line coverage: 613/616 (99.5%) over RTL + testbench; the only uncovered RTL line is
+  the `DEPTH < 4` parameter warning
+- Toggle coverage: 81/81 (100.0%)
+- FORMAL variant (`iverilog -g2012 -gsupported-assertions -DFORMAL`) compiles clean
 
 ## Parameters
 
@@ -62,7 +67,7 @@ Latest verified results (`DW=8`, `DEPTH=16`):
 | `empty` | O | read | No readable entries |
 | `almost_empty` | O | read | Occupancy at/below configured threshold |
 | `cfg_clk` | I | config | Configuration clock |
-| `cfg_rst_n` | I | config | Active-low configuration reset |
+| `cfg_rst_n` | I | config | Active-low; async assert, synchronized release |
 | `cfg_we` | I | config | Configuration write enable |
 | `cfg_re` | I | config | Configuration read enable; gates `cfg_rdata` |
 | `cfg_addr[3:0]` | I | config | Register address |
@@ -88,7 +93,9 @@ Latest verified results (`DW=8`, `DEPTH=16`):
 
 `irq = |(irq_status & irq_mask)`. Status sources are synchronized levels, so assertion/deassertion has CDC latency. Sticky errors do not currently feed `irq`.
 
-Flush resets both data-domain pointers through a request/acknowledge toggle handshake. Access is blocked while each domain accepts the request. Do not issue another flush while busy; such writes are ignored. FIFO memory is not erased, but flushed entries become inaccessible.
+Flush resets both data-domain pointers through a request/acknowledge toggle handshake. Each domain resets its pointer, holds traffic, and only then acknowledges; the acknowledge is delayed until the synchronized peer pointer reads zero, so `flush_busy` covers the whole resynchronization window. A write or read request issued during that window is dropped and sets the corresponding sticky overflow/underflow bit (clear it through address `5`). Do not issue another flush while busy; such writes are ignored. FIFO memory is not erased, but flushed entries become inaccessible.
+
+Sticky clear is a toggle request/acknowledge handshake as well. A W1C write issued while a previous clear is still in flight (acknowledge not yet returned) is ignored rather than queued, so back-to-back writes cannot drop or wedge a clear. Poll address `5` and retry if needed.
 
 Change active depth only while the FIFO is empty. Software must ensure the almost-full threshold is sensible for the selected active depth.
 
@@ -98,9 +105,8 @@ Configuration values are converted to Gray code in `cfg_clk`, synchronized throu
 
 ```text
 rtl/async_fifo.sv       FIFO RTL
-rtl/async_fifo_if.sv    Optional SystemVerilog interface
-rtl/async_fifo_pkg.sv   Shared helpers/types
 tb/tb_async_fifo.sv     Self-checking testbench
+tb/tb_flush_hazard.sv   Flush-resume CDC regression
 sim/run_iverilog.sh     Icarus runner
 sim/run_verilator.sh    Verilator coverage runner
 sim/sim_main.cpp        Verilator coverage harness
@@ -114,6 +120,7 @@ doc/design.md           Design and integration details
 - `rd_data` updates on an accepted read clock edge.
 - Status and occupancy use synchronized pointers/signals; readback is intentionally approximate by synchronizer latency.
 - Apply CDC timing constraints and preserve `ASYNC_REG` chains in implementation.
+- Coverage reporting needs `verilator_coverage` on `PATH` (installed with Verilator).
 - No license file currently exists; add one before redistribution if required.
 
 ## References

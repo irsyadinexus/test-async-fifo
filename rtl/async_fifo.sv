@@ -56,6 +56,15 @@ module async_fifo #(
   localparam logic [PTR_W-1:0] AF_DEFAULT = PTR_W'(AF_DEFAULT_INT);
   localparam logic [PTR_W-1:0] DEPTH_VALUE = PTR_W'(DEPTH);
 
+  initial begin
+    if (DEPTH < 2 || (DEPTH & (DEPTH-1)) != 0)
+      $fatal(1, "async_fifo: DEPTH must be a power of two >= 2");
+    if (DEPTH < 4)
+      $warning("async_fifo: DEPTH < 4 makes fractional depth modes degenerate");
+    if (ADDR_W != $clog2(DEPTH))
+      $fatal(1, "async_fifo: ADDR_W must equal $clog2(DEPTH)");
+  end
+
   // -------------------------------------------------------------------------
   // Dual-port RAM
   // -------------------------------------------------------------------------
@@ -82,14 +91,18 @@ module async_fifo #(
   logic overflow_clear_toggle, underflow_clear_toggle;
   logic [1:0] overflow_clear_sync, underflow_clear_sync;
   logic overflow_clear_seen, underflow_clear_seen;
+  logic overflow_clear_ack, underflow_clear_ack;
+  (* ASYNC_REG = "TRUE" *) logic [1:0] overflow_ack_sync, underflow_ack_sync;
   logic flush_req_toggle;
   logic [1:0] flush_wr_sync, flush_rd_sync;
   logic flush_wr_seen, flush_rd_seen;
+  logic flush_wr_active, flush_rd_active;
   logic [1:0] flush_wr_ack_sync, flush_rd_ack_sync;
   wire flush_busy = (flush_wr_ack_sync[1] != flush_req_toggle) ||
                     (flush_rd_ack_sync[1] != flush_req_toggle);
   (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] wr_ptr_cfg_sync1, wr_ptr_cfg_sync2;
   (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] rd_ptr_cfg_sync1, rd_ptr_cfg_sync2;
+  (* ASYNC_REG = "TRUE" *) logic [PTR_W-1:0] depth_cfg_sync1, depth_cfg_sync2;
   (* ASYNC_REG = "TRUE" *) logic [1:0] full_cfg_sync, empty_cfg_sync;
   (* ASYNC_REG = "TRUE" *) logic [1:0] af_cfg_sync, ae_cfg_sync;
   wire [3:0] irq_status = {ae_cfg_sync[1], af_cfg_sync[1],
@@ -108,8 +121,17 @@ module async_fifo #(
     return bin;
   endfunction
 
+  // Config-domain reset synchronizer (async assert, cfg_clk-sync release).
+  (* ASYNC_REG = "TRUE" *) logic [1:0] cfg_rst_sync;
+  wire cfg_reset_n = cfg_rst_sync[1];
+
   always_ff @(posedge cfg_clk or negedge cfg_rst_n) begin
-    if (!cfg_rst_n) begin
+    if (!cfg_rst_n) cfg_rst_sync <= '0;
+    else            cfg_rst_sync <= {cfg_rst_sync[0], 1'b1};
+  end
+
+  always_ff @(posedge cfg_clk or negedge cfg_reset_n) begin
+    if (!cfg_reset_n) begin
       ae_cfg_gray <= bin_to_gray(AE_DEFAULT);
       af_cfg_gray <= bin_to_gray(AF_DEFAULT);
       depth_cfg_gray <= bin_to_gray(DEPTH_VALUE);
@@ -131,8 +153,10 @@ module async_fifo #(
         end
         4'd3: irq_mask <= cfg_wdata[3:0];
         4'd5: begin
-          if (cfg_wdata[0]) overflow_clear_toggle <= ~overflow_clear_toggle;
-          if (cfg_wdata[1]) underflow_clear_toggle <= ~underflow_clear_toggle;
+          if (cfg_wdata[0] && (overflow_ack_sync[1] == overflow_clear_toggle))
+            overflow_clear_toggle <= ~overflow_clear_toggle;
+          if (cfg_wdata[1] && (underflow_ack_sync[1] == underflow_clear_toggle))
+            underflow_clear_toggle <= ~underflow_clear_toggle;
         end
         4'd8: if (cfg_wdata[0] && !flush_busy)
                 flush_req_toggle <= ~flush_req_toggle;
@@ -141,8 +165,8 @@ module async_fifo #(
     end
   end
 
-  always_ff @(posedge cfg_clk or negedge cfg_rst_n) begin
-    if (!cfg_rst_n) begin
+  always_ff @(posedge cfg_clk or negedge cfg_reset_n) begin
+    if (!cfg_reset_n) begin
       full_cfg_sync  <= '0;
       empty_cfg_sync <= '0;
       af_cfg_sync    <= '0;
@@ -153,8 +177,12 @@ module async_fifo #(
       wr_ptr_cfg_sync2 <= '0;
       rd_ptr_cfg_sync1 <= '0;
       rd_ptr_cfg_sync2 <= '0;
+      depth_cfg_sync1 <= bin_to_gray(DEPTH_VALUE);
+      depth_cfg_sync2 <= bin_to_gray(DEPTH_VALUE);
       flush_wr_ack_sync <= '0;
       flush_rd_ack_sync <= '0;
+      overflow_ack_sync  <= '0;
+      underflow_ack_sync <= '0;
     end else begin
       full_cfg_sync  <= {full_cfg_sync[0], full};
       empty_cfg_sync <= {empty_cfg_sync[0], empty};
@@ -166,8 +194,12 @@ module async_fifo #(
       wr_ptr_cfg_sync2 <= wr_ptr_cfg_sync1;
       rd_ptr_cfg_sync1 <= rd_ptr_gray;
       rd_ptr_cfg_sync2 <= rd_ptr_cfg_sync1;
+      depth_cfg_sync1 <= depth_cfg_gray;
+      depth_cfg_sync2 <= depth_cfg_sync1;
       flush_wr_ack_sync <= {flush_wr_ack_sync[0], flush_wr_seen};
       flush_rd_ack_sync <= {flush_rd_ack_sync[0], flush_rd_seen};
+      overflow_ack_sync  <= {overflow_ack_sync[0],  overflow_clear_ack};
+      underflow_ack_sync <= {underflow_ack_sync[0], underflow_clear_ack};
     end
   end
 
@@ -177,7 +209,7 @@ module async_fifo #(
       case (cfg_addr)
         4'd0: cfg_rdata = gray_to_bin(ae_cfg_gray);
         4'd1: cfg_rdata = gray_to_bin(af_cfg_gray);
-        4'd2: cfg_rdata = active_depth;
+        4'd2: cfg_rdata = gray_to_bin(depth_cfg_sync2);
         4'd3: cfg_rdata = PTR_W'(irq_mask);
         4'd4: cfg_rdata = PTR_W'(irq_status);
         4'd5: cfg_rdata = PTR_W'({underflow_cfg_sync[1], overflow_cfg_sync[1]});
@@ -241,10 +273,8 @@ module async_fifo #(
   // Internal write/read enables (gated by full/empty)
   logic do_write, do_read;
 
-  assign do_write = wr_reset_n && wr_en && !full &&
-                    (flush_wr_sync[1] == flush_wr_seen);
-  assign do_read  = rd_reset_n && rd_en && !empty &&
-                    (flush_rd_sync[1] == flush_rd_seen);
+  assign do_write = wr_reset_n && wr_en && !full && !flush_wr_active;
+  assign do_read  = rd_reset_n && rd_en && !empty && !flush_rd_active;
 
   // Sticky access errors. W1C requests cross back as toggles, preventing a
   // narrow cfg_clk pulse from being missed by either asynchronous domain.
@@ -252,11 +282,15 @@ module async_fifo #(
     if (!wr_reset_n) begin
       overflow_clear_sync <= '0;
       overflow_clear_seen <= 1'b0;
+      overflow_clear_ack  <= 1'b0;
       overflow_sticky <= 1'b0;
     end else begin
       overflow_clear_sync <= {overflow_clear_sync[0], overflow_clear_toggle};
       overflow_clear_seen <= overflow_clear_sync[1];
-      if (overflow_clear_sync[1] != overflow_clear_seen) overflow_sticky <= 1'b0;
+      if (overflow_clear_sync[1] != overflow_clear_seen) begin
+        overflow_sticky    <= 1'b0;
+        overflow_clear_ack <= ~overflow_clear_ack;
+      end
       if (wr_en && full) overflow_sticky <= 1'b1;
     end
   end
@@ -265,11 +299,15 @@ module async_fifo #(
     if (!rd_reset_n) begin
       underflow_clear_sync <= '0;
       underflow_clear_seen <= 1'b0;
+      underflow_clear_ack  <= 1'b0;
       underflow_sticky <= 1'b0;
     end else begin
       underflow_clear_sync <= {underflow_clear_sync[0], underflow_clear_toggle};
       underflow_clear_seen <= underflow_clear_sync[1];
-      if (underflow_clear_sync[1] != underflow_clear_seen) underflow_sticky <= 1'b0;
+      if (underflow_clear_sync[1] != underflow_clear_seen) begin
+        underflow_sticky    <= 1'b0;
+        underflow_clear_ack <= ~underflow_clear_ack;
+      end
       if (rd_en && empty) underflow_sticky <= 1'b1;
     end
   end
@@ -291,13 +329,19 @@ module async_fifo #(
       wr_ptr_gray <= '0;
       flush_wr_sync <= '0;
       flush_wr_seen <= 1'b0;
+      flush_wr_active <= 1'b0;
     end else begin
       flush_wr_sync <= {flush_wr_sync[0], flush_req_toggle};
       if (flush_wr_sync[1] != flush_wr_seen) begin
-        wr_ptr_bin <= '0;
-        wr_ptr_gray <= '0;
-        flush_wr_seen <= flush_wr_sync[1];
-      end else begin
+        if (!flush_wr_active) begin
+          wr_ptr_bin      <= '0;
+          wr_ptr_gray     <= '0;
+          flush_wr_active <= 1'b1;
+        end else if (rd_ptr_gray_sync2 == '0) begin
+          flush_wr_active <= 1'b0;
+          flush_wr_seen   <= flush_wr_sync[1];
+        end
+      end else if (!flush_wr_active) begin
         wr_ptr_bin  <= wr_ptr_bin_next;
         wr_ptr_gray <= wr_ptr_gray_next;
       end
@@ -349,13 +393,19 @@ module async_fifo #(
       rd_ptr_gray <= '0;
       flush_rd_sync <= '0;
       flush_rd_seen <= 1'b0;
+      flush_rd_active <= 1'b0;
     end else begin
       flush_rd_sync <= {flush_rd_sync[0], flush_req_toggle};
       if (flush_rd_sync[1] != flush_rd_seen) begin
-        rd_ptr_bin <= '0;
-        rd_ptr_gray <= '0;
-        flush_rd_seen <= flush_rd_sync[1];
-      end else begin
+        if (!flush_rd_active) begin
+          rd_ptr_bin      <= '0;
+          rd_ptr_gray     <= '0;
+          flush_rd_active <= 1'b1;
+        end else if (wr_ptr_gray_sync2 == '0) begin
+          flush_rd_active <= 1'b0;
+          flush_rd_seen   <= flush_rd_sync[1];
+        end
+      end else if (!flush_rd_active) begin
         rd_ptr_bin  <= rd_ptr_bin_next;
         rd_ptr_gray <= rd_ptr_gray_next;
       end
@@ -384,7 +434,7 @@ module async_fifo #(
   end
 
   // Empty flag: pointers equal
-  assign empty = (rd_ptr_gray == wr_ptr_gray_sync2);
+  assign empty = flush_rd_active ? 1'b1 : (rd_ptr_gray == wr_ptr_gray_sync2);
 
   logic [PTR_W-1:0] wr_ptr_bin_sync;
   always_comb begin
@@ -399,16 +449,17 @@ module async_fifo #(
   assign rd_ptr_gray_sync = rd_ptr_gray_sync2; // synced to write
 
   // -------------------------------------------------------------------------
-  // Assertions (synthesis-safe — for simulation/formal)
+  // Assertions (`ifdef FORMAL — simulation / formal only)
   // -------------------------------------------------------------------------
 `ifdef FORMAL
-  // synthesis translate_off
-  default property:
+  // Occupancy can never exceed one pointer lap; catches pointer corruption
+  // and overfill beyond the physical depth.
   assert property (@(posedge wr_clk) disable iff (!wr_reset_n)
-    !(full && wr_en) |-> !full) else $error("Write when full!");
+    ((wr_ptr_bin - rd_ptr_bin_sync) < 2*DEPTH))
+    else $error("write-domain occupancy out of range");
   assert property (@(posedge rd_clk) disable iff (!rd_reset_n)
-    !(empty && rd_en) |-> !empty) else $error("Read when empty!");
-  // synthesis translate_on
+    ((wr_ptr_bin_sync - rd_ptr_bin) < 2*DEPTH))
+    else $error("read-domain occupancy out of range");
 `endif
 
 endmodule
