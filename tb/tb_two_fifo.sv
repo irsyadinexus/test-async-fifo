@@ -29,11 +29,11 @@ module tb_two_fifo;
   // --- Controller clock and four independent FIFO port clocks ---
   // Each is a distinct non-harmonic frequency with a distinct phase offset.
   logic ctl_clk = 0, f1w = 0, f1r = 0, f2w = 0, f2r = 0;
-  initial forever #6    ctl_clk = ~ctl_clk;              // 12 ns,  83.3 MHz, phase 0
-  initial begin #1.3;  forever #5    f1w = ~f1w;  end    // 10 ns, 100.0 MHz, phase 1.3 ns
-  initial begin #3.1;  forever #6.5  f1r = ~f1r;  end    // 13 ns,  76.9 MHz, phase 3.1 ns
-  initial begin #7.3;  forever #10.5 f2w = ~f2w;  end    // 21 ns,  47.6 MHz, phase 7.3 ns
-  initial begin #4.5;  forever #4.5  f2r = ~f2r;  end    //  9 ns, 111.1 MHz, phase 4.5 ns
+  initial forever #5       ctl_clk = ~ctl_clk;           //  10.00  ns, 100.0 MHz, phase 0
+  initial begin #1.3;  forever #38.4615 f1w = ~f1w; end  //  76.92  ns,  13.0 MHz, phase 1.3 ns
+  initial begin #3.1;  forever #55.5556 f1r = ~f1r; end  // 111.11  ns,   9.0 MHz, phase 3.1 ns
+  initial begin #7.3;  forever #71.4286 f2w = ~f2w; end  // 142.86  ns,   7.0 MHz, phase 7.3 ns
+  initial begin #4.5;  forever #45.4545 f2r = ~f2r; end  //  90.91  ns,  11.0 MHz, phase 4.5 ns
 
   // --- Resets (separate async reset per port domain) ---
   logic rst1w = 0, rst1r = 0, rst2w = 0, rst2r = 0;
@@ -209,8 +209,9 @@ module tb_two_fifo;
     $display("========================================");
     $display("  Two-FIFO Chain Simulation");
     $display("  DW=%0d  DEPTH=%0d  ADDR_W=%0d", DW, DEPTH, ADDR_W);
-    $display("  Clocks: ctl 12 ns ph 0 | f1w 10 ns ph 1.3 | f1r 13 ns ph 3.1");
-    $display("          f2w 21 ns ph 7.3 | f2r 9 ns ph 4.5");
+    $display("  Clocks: ctl 10 ns (100 MHz) ph 0 | f1w 76.92 ns (13 MHz) ph 1.3");
+    $display("          f1r 111.11 ns (9 MHz) ph 3.1 | f2w 142.86 ns (7 MHz) ph 7.3");
+    $display("          f2r 90.91 ns (11 MHz) ph 4.5");
     $display("  Controller waits 100 ctl_clk cycles between write and read bursts");
     $display("========================================");
 
