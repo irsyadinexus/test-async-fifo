@@ -6,8 +6,9 @@
 // reads FIFO2 back and compares; then fills FIFO2 with ascending data, moves it
 // back into FIFO1, reads FIFO1 back and compares. Every FIFO port runs on its
 // own clock frequency and phase, so both DUTs' internal Gray-code CDC is
-// exercised. The controller waits 100 of its own clock cycles before every
-// individual write and read.
+// exercised. The controller waits 100 of its own clock cycles between a
+// completed burst of writes and the following burst of reads (and vice versa);
+// accesses inside a burst run back-to-back on the target port's clock.
 //
 // Usage (Icarus Verilog), from the repository root:
 //   iverilog -g2012 -o sim/tb_two.vvp -I rtl rtl/async_fifo.sv tb/tb_two_fifo.sv
@@ -114,6 +115,7 @@ module tb_two_fifo;
   // -----------------------------------------------------------------------
   logic [DW-1:0] exp1 [$];
   logic [DW-1:0] exp2 [$];
+  logic [DW-1:0] move_q  [$]; // move buffer: drained FIFO -> refilled FIFO
   int errors     = 0;
   int wr1_count  = 0;
   int rd1_count  = 0;
@@ -131,6 +133,7 @@ module tb_two_fifo;
       f2_wr_en = 0; f2_rd_en = 0; f2_wr_data = 0;
       exp1.delete();
       exp2.delete();
+      move_q.delete();
       repeat (4) @(posedge f1w);
       repeat (4) @(posedge f1r);
       repeat (4) @(posedge f2w);
@@ -144,9 +147,11 @@ module tb_two_fifo;
   endtask
 
   // -----------------------------------------------------------------------
-  // 100 controller-clock-cycle delay before every individual operation
+  // 100 controller-clock-cycle gap between a completed burst of writes and
+  // the following burst of reads (or vice versa) — not between the individual
+  // accesses inside a burst.
   // -----------------------------------------------------------------------
-  task automatic delay100;
+  task automatic gap;
     repeat (100) @(posedge ctl_clk);
   endtask
 
@@ -155,7 +160,6 @@ module tb_two_fifo;
   // -----------------------------------------------------------------------
   task automatic f1_write(input [DW-1:0] d);
     begin
-      delay100;
       while (f1_full) @(posedge f1w);
       @(negedge f1w); f1_wr_en = 1; f1_wr_data = d;
       @(posedge f1w); #1 f1_wr_en = 0;
@@ -165,7 +169,6 @@ module tb_two_fifo;
 
   task automatic f1_read(output [DW-1:0] d);
     begin
-      delay100;
       while (f1_empty) @(posedge f1r);
       @(negedge f1r); f1_rd_en = 1;
       @(posedge f1r); #1 f1_rd_en = 0;
@@ -176,7 +179,6 @@ module tb_two_fifo;
 
   task automatic f2_write(input [DW-1:0] d);
     begin
-      delay100;
       while (f2_full) @(posedge f2w);
       @(negedge f2w); f2_wr_en = 1; f2_wr_data = d;
       @(posedge f2w); #1 f2_wr_en = 0;
@@ -186,7 +188,6 @@ module tb_two_fifo;
 
   task automatic f2_read(output [DW-1:0] d);
     begin
-      delay100;
       while (f2_empty) @(posedge f2r);
       @(negedge f2r); f2_rd_en = 1;
       @(posedge f2r); #1 f2_rd_en = 0;
@@ -210,7 +211,7 @@ module tb_two_fifo;
     $display("  DW=%0d  DEPTH=%0d  ADDR_W=%0d", DW, DEPTH, ADDR_W);
     $display("  Clocks: ctl 12 ns ph 0 | f1w 10 ns ph 1.3 | f1r 13 ns ph 3.1");
     $display("          f2w 21 ns ph 7.3 | f2r 9 ns ph 4.5");
-    $display("  Controller waits 100 ctl_clk cycles before every write/read");
+    $display("  Controller waits 100 ctl_clk cycles between write and read bursts");
     $display("========================================");
 
     do_reset;
@@ -222,7 +223,8 @@ module tb_two_fifo;
       f1_write(d);
       exp1.push_back(d);
     end
-    $display("  Phase 1: filled FIFO1 with %0d random words", DEPTH);
+    gap; // completed write burst -> read burst
+    $display("  Phase 1: filled FIFO1 with %0d random words, back-to-back", DEPTH);
 
     // --- Phase 2: move FIFO1 -> FIFO2 ------------------------------------
     // Per-word compare proves FIFO1's f1w->f1r Gray CDC.
@@ -238,10 +240,16 @@ module tb_two_fifo;
           $error("MOVE1 MISMATCH: got %0d, expected %0d", d, e);
           errors++;
         end
-        f2_write(d);
-        exp2.push_back(d);
+        move_q.push_back(d);
       end
     end
+    gap; // completed read burst -> write burst
+    while (move_q.size() > 0) begin
+      d = move_q.pop_front();
+      f2_write(d);
+      exp2.push_back(d);
+    end
+    gap; // completed write burst -> read burst
     $display("  Phase 2: moved %0d words (f1 reads=%0d, f2 writes=%0d)",
              DEPTH, rd1_count, wr2_count);
 
@@ -267,6 +275,7 @@ module tb_two_fifo;
       errors++;
     end
     $display("  Phase 3: read back %0d words, FIFO2 empty=%b", rd2_count, f2_empty);
+    gap; // completed read burst -> write burst
 
     // --- Phase 4: fill FIFO2 with ascending data -------------------------
     $display("=== Phase 4: fill FIFO2 with ascending data ===");
@@ -275,7 +284,8 @@ module tb_two_fifo;
       f2_write(d);
       exp2.push_back(d);
     end
-    $display("  Phase 4: filled FIFO2 with %0d ascending words", DEPTH);
+    gap; // completed write burst -> read burst
+    $display("  Phase 4: filled FIFO2 with %0d ascending words, back-to-back", DEPTH);
 
     // --- Phase 5: move FIFO2 -> FIFO1 ------------------------------------
     $display("=== Phase 5: move FIFO2 -> FIFO1 ===");
@@ -290,10 +300,16 @@ module tb_two_fifo;
           $error("MOVE2 MISMATCH: got %0d, expected %0d", d, e);
           errors++;
         end
-        f1_write(d);
-        exp1.push_back(d);
+        move_q.push_back(d);
       end
     end
+    gap; // completed read burst -> write burst
+    while (move_q.size() > 0) begin
+      d = move_q.pop_front();
+      f1_write(d);
+      exp1.push_back(d);
+    end
+    gap; // completed write burst -> read burst
     $display("  Phase 5: moved %0d words (f2 reads=%0d, f1 writes=%0d)",
              DEPTH, rd2_count, wr1_count);
 

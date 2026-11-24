@@ -36,10 +36,10 @@ Latest verified results (commit `8aed8ea`, 2026-11-24). Functional tests use
 
 - Functional tests: all passed, 0 errors; 334 writes and 282 reads modeled and checked
 - Flush-resume regression (wr 5 MHz / rd 50 MHz / cfg 500 MHz): passed
-- Two-FIFO chain (`DEPTH=64`, 64 words per direction, ctl 12 ns / f1w 10 ns /
-  f1r 13 ns / f2w 21 ns / f2r 9 ns, 100 ctl cycles before every access): passed,
-  0 errors; 128 writes and 128 reads per FIFO, 512 compared transfers, ~619 µs
-  of simulated time; waveform in `sim/tb_two_fifo.vcd`
+- Two-FIFO chain (`DEPTH=64`, 64-word bursts, ctl 12 ns / f1w 10 ns /
+  f1r 13 ns / f2w 21 ns / f2r 9 ns, 100 ctl cycles between bursts): passed,
+  0 errors; 512 transfers total (128 writes and 128 reads per FIFO), 256 read
+  words compared, ~16 µs of simulated time; waveform in `sim/tb_two_fifo.vcd`
 - Depth modes: 4/4
 - Almost-flag transitions: 4/4
 - Boundary cases: 4/4
@@ -117,11 +117,15 @@ Configuration values are converted to Gray code in `cfg_clk`, synchronized throu
 
 `tb/tb_two_fifo.sv` (`make two-fifo`) instantiates two `async_fifo` DUTs and one
 behavioral controller. Every FIFO port runs on its own clock, so both DUTs' Gray
-CDC is exercised; the controller waits 100 `ctl_clk` cycles before each access.
+CDC is exercised. Each FIFO is accessed in back-to-back bursts: every word in a
+burst is transferred on consecutive target-port cycles, and the controller waits
+100 `ctl_clk` cycles (1.2 µs) between a completed burst of writes and the
+following burst of reads, or a completed burst of reads and the following burst
+of writes.
 
 ```mermaid
 flowchart LR
-    C["Controller<br/>ctl_clk 12 ns<br/>100 ctl cycles before every write/read"]
+    C["Controller<br/>ctl_clk 12 ns<br/>100 ctl cycles between bursts"]
     F1["FIFO1 — async_fifo, DEPTH=64<br/>wr f1w 10 ns, rd f1r 13 ns"]
     F2["FIFO2 — async_fifo, DEPTH=64<br/>wr f2w 21 ns, rd f2r 9 ns"]
     C -->|"write: phases 1, 5"| F1
@@ -130,11 +134,14 @@ flowchart LR
     F2 -->|"read: phases 3, 5"| C
 ```
 
-Phase 1 fills FIFO1 with random words, phase 2 moves them into FIFO2, phase 3
-reads FIFO2 back. Phase 4 fills FIFO2 with ascending words, phase 5 moves them
-into FIFO1, phase 6 reads FIFO1 back. Every transferred word is compared against
-the `exp1`/`exp2` expected-data queues; phase 7 checks both DUTs are empty with
+Phase 1 fills FIFO1 with random words, phase 2 drains FIFO1 into the controller's
+move buffer and refills FIFO2 from it, phase 3 reads FIFO2 back. Phase 4 fills
+FIFO2 with ascending words, phase 5 drains FIFO2 into the buffer and refills
+FIFO1, phase 6 reads FIFO1 back. Every read word is compared against the
+`exp1`/`exp2` expected-data queues; phase 7 checks both DUTs are empty with
 balanced pointers. The run dumps full-depth waveforms to `sim/tb_two_fifo.vcd`.
+Measured from that dump: bursts of 64 accesses spaced exactly one port clock
+(f1w 10 ns, f1r 13 ns, f2w 21 ns, f2r 9 ns), burst boundaries ≥ 1.2 µs apart.
 
 ## Repository Layout
 
