@@ -317,8 +317,46 @@ The `FORMAL` assertions are simulation/formal-only. Icarus parses them but does 
 
 - Preserve the two-stage synchronizers and reset synchronizers.
 - Apply asynchronous clock-group constraints between `wr_clk`, `rd_clk`, and `cfg_clk`.
-- Wrappers add clock groups: `pclk` (APB, one group), `hclk`/`cfg_clk`/`wr_clk`/`rd_clk` (AHB), and `aclk`/`s_axis_aclk`/`m_axis_aclk` (AXI-Stream). Constrain each pair as asynchronous. `fpga/constraints.sdc` carries a commented template per wrapper, including which clock owns each status/pointer output per MODE.
-- Treat the AHB MODE clock muxes as quasi-static: they are combinational muxes, so synthesis cannot retime across them and a live switch is unsupported.
 - Review `fpga/constraints.sdc`; adapt object paths to the synthesis tool.
 - Constrain Gray buses for skew where supported, so source bits cannot arrive more than one fast-clock period apart.
 - Confirm dual-port memory inference in synthesis reports.
+- See [Wrapper clock domains](#wrapper-clock-domains) for the wrapper clock sets, group declarations, and reset mapping.
+
+### Wrapper clock domains
+
+The wrappers add no CDC logic of their own. Every cross-domain path is still one of
+the core's two-stage synchronizers, plus one quasi-static control path in the AHB
+wrapper (MODE).
+
+| Wrapper | Clocks | SDC grouping | Cross-domain paths |
+|---|---|---|---|
+| APB | `pclk` | single clock, no groups needed | none; the core's write, read, and config domains share `pclk`, so its synchronizers become same-clock registers and keep their two-cycle latency |
+| AHB | `hclk`, `cfg_clk`, `wr_clk`, `rd_clk` | one `-asynchronous` set over all four | core pointer synchronizers between the AHB-owned side (`hclk`) and the released raw side (`wr_clk` or `rd_clk`); config Gray synchronizers from `cfg_clk` into each data domain; MODE (`cfg_clk`) to the clock muxes and port-ownership gates per MODE |
+| AXI-Stream | `aclk`, `s_axis_aclk`, `m_axis_aclk` | one `-asynchronous` set over all three | core pointer synchronizers (`s_axis_aclk` ↔ `m_axis_aclk`) and config synchronizers from `aclk` into both data domains; no wrapper register crosses a domain |
+
+- Declare the whole clock set asynchronous even when a mode leaves a raw clock idle.
+  The AHB engine's combinational gating still touches the flag of the side it does
+  not own, and the MODE muxes expose both clocks at the core's clock pins, so
+  pairwise-in-use groups would leave real, statically disabled paths unconstrained.
+- AHB status and pointer outputs change owning clock with MODE. In MODE 0/3 all of
+  `full`, `empty`, `almost_full`, `almost_empty`, `wr_ptr_gray_sync`, and
+  `rd_ptr_gray_sync` are `hclk`-domain; in MODE 1 `empty`, `almost_empty`, and
+  `wr_ptr_gray_sync` are `rd_clk`; in MODE 2 `full`, `almost_full`, and
+  `rd_ptr_gray_sync` are `wr_clk`. Constrain each for the mode you configure; the
+  commented templates in `fpga/constraints.sdc` encode this.
+- Treat the AHB MODE clock muxes as quasi-static: they are plain combinational
+  muxes, so nothing retimes across them and a live switch is unsupported. The MODE
+  register is written from `cfg_clk` only with the data-domain resets asserted, so
+  no path needs to close from it to the mux selects; false-path it if a tool
+  reports one (example in the SDC).
+- The AXI-Stream output pipeline (`s1_full`, `out_valid`, `out_data`) and
+  `pop_issue` are entirely `m_axis_aclk`; `s_axis_tready` and `wr_en` are entirely
+  `s_axis_aclk` and depend combinationally on the core's `full`. Keep the ready
+  path in the write domain; do not pipeline it into the read domain.
+- The wrappers add no new Gray buses, so the skew rule above is unchanged, and the
+  pointer outputs they expose are already the core's two-stage synchronized copies.
+- Reset mapping: APB `presetn` covers all three core domains; AHB `hresetn` resets
+  the AHB engine only, with `cfg_presetn` for config and `wr_rst_n`/`rd_rst_n` for
+  the raw sides; AXI-Stream uses `aresetn`, `s_axis_aresetn`, and `m_axis_aresetn`
+  for config, write, and read. Each is asynchronous-assert with a per-domain
+  synchronized release, so false-path each reset port.
