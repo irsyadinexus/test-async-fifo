@@ -188,6 +188,99 @@ combinational register value registered into `RDATA`, and hold `RVALID` until
 `RREADY`. Both responses are always `OKAY`; reserved offsets are forwarded and
 ignored.
 
+### APB wrapper ports
+
+`fifo_apb_wrapper`: one APB slave, `ADDR_W = $clog2(DEPTH)`. The FIFO write, read,
+and config domains all run on `pclk`, so the domain column below names the core
+domain rather than a second clock.
+
+| Signal | Dir | Domain | Description |
+|---|---|---|---|
+| `pclk` | I | — | Single clock: FIFO write/read/config and the APB slave |
+| `presetn` | I | — | Active-low reset for all three core domains; async assert, synchronized release |
+| `psel`, `penable`, `pwrite` | I | pclk | APB select, enable, direction (`1` = write) |
+| `paddr[31:0]` | I | pclk | `[8]` selects the window (`0` = registers, `1` = data), `[5:2]` is the register offset |
+| `pwdata[31:0]` | I | pclk | Push data `[DW-1:0]`, or register write data `[ADDR_W:0]` |
+| `prdata[31:0]` | O | pclk | Zero-extended register readback, or the popped word during the completing pop cycle; `0` otherwise |
+| `pready` | O | pclk | `0` while the access waits: push while `full`, pop while `empty`, or the pop's data cycle; `1` for every register access |
+| `pslverr` | O | pclk | Tied `0`; an unsatisfiable access stalls instead of erroring |
+| `irq` | O | config | Core IRQ, OR of the masked status bits |
+| `almost_empty` | O | read | Core almost-empty threshold flag |
+| `almost_full` | O | write | Core almost-full threshold flag |
+| `wr_ptr_gray_sync[ADDR_W:0]` | O | read | Write pointer synchronized into the read domain |
+| `rd_ptr_gray_sync[ADDR_W:0]` | O | write | Read pointer synchronized into the write domain |
+
+### AHB wrapper ports
+
+`fifo_ahb_wrapper`: AHB-Lite data slave, APB config slave, and the raw FIFO side.
+
+| Signal | Dir | Domain | Description |
+|---|---|---|---|
+| `hclk` | I | — | AHB clock; also the FIFO clock for every side the AHB engine owns |
+| `hresetn` | I | — | Resets the AHB engine only (latched request, read capture), not the FIFO |
+| `hsel` | I | hclk | Slave select during the address phase |
+| `haddr[31:0]` | I | hclk | Ignored: one data window |
+| `htrans[1:0]` | I | hclk | `[1]` (NONSEQ/SEQ) starts a transfer; `[0]` ignored |
+| `hwrite` | I | hclk | `1` = push, `0` = pop |
+| `hsize[2:0]` | I | hclk | Ignored: every transfer is a full 32-bit word |
+| `hwdata[31:0]` | I | hclk | Push data `[DW-1:0]`, sampled in the data phase |
+| `hrdata[31:0]` | O | hclk | Zero-extended popped word in the completing data phase; `0` otherwise, and `0` for MODE 1 reads |
+| `hready` | I | hclk | Global HREADY from the interconnect; tie to `hreadyout` in a single-slave system |
+| `hreadyout` | O | hclk | `0` while a data phase waits (push/`full`, pop/`empty`, or the pop's data cycle) |
+| `hresp` | O | hclk | Tied `0` (OKAY); the slave stalls instead of erroring |
+| `cfg_clk` | I | — | Config clock: the MODE register and the core config port |
+| `cfg_presetn` | I | — | Active-low config-domain reset (also the core `cfg_rst_n`) |
+| `cfg_psel`, `cfg_penable`, `cfg_pwrite` | I | cfg_clk | APB select, enable, direction |
+| `cfg_paddr[31:0]` | I | cfg_clk | `[5:2]` word offset `0..15`; offset `9` is the wrapper MODE register |
+| `cfg_pwdata[31:0]` | I | cfg_clk | Register write data; `[ADDR_W:0]` reaches the core, `[1:0]` carries MODE |
+| `cfg_prdata[31:0]` | O | cfg_clk | Zero-extended register readback, including MODE at offset `9` |
+| `cfg_pready` | O | cfg_clk | Constant `1`: zero-wait-state config accesses |
+| `wr_clk`, `wr_rst_n` | I | write | FIFO write-side clock/reset, driving the core only in MODE 2; tie the reset to `hresetn` in MODE 0/3 |
+| `rd_clk`, `rd_rst_n` | I | read | FIFO read-side clock/reset, driving the core only in MODE 1; tie the reset to `hresetn` in MODE 0/3 |
+| `ext_wr_en` | I | write | Raw write enable; reaches the FIFO only in MODE 2 |
+| `ext_wr_data[DW-1:0]` | I | write | Raw write data; used only in MODE 2 |
+| `ext_rd_en` | I | read | Raw read enable; reaches the FIFO only in MODE 1 |
+| `ext_rd_data[DW-1:0]` | O | read | Registered core read data; meaningful in MODE 1 |
+| `full` | O | write | Core full flag (hclk-clocked whenever the AHB owns the write side) |
+| `empty` | O | read | Core empty flag (hclk-clocked whenever the AHB owns the read side) |
+| `almost_full`, `almost_empty` | O | write / read | Core threshold flags |
+| `irq` | O | config | Core IRQ, OR of the masked status bits |
+| `wr_ptr_gray_sync[ADDR_W:0]` | O | read | Write pointer synchronized into the read domain |
+| `rd_ptr_gray_sync[ADDR_W:0]` | O | write | Read pointer synchronized into the write domain |
+
+### AXI-Stream wrapper ports
+
+`fifo_axis_wrapper`: AXI4-Lite config slave, `s_axis` push side, `m_axis` pop side.
+
+| Signal | Dir | Domain | Description |
+|---|---|---|---|
+| `aclk` | I | — | Config clock (core `cfg_clk`) |
+| `aresetn` | I | — | Active-low config-domain reset |
+| `awaddr[31:0]` | I | aclk | `[5:2]` word offset `0..15` |
+| `awvalid`, `awready` | I / O | aclk | Write address handshake; `awready` is `0` while a `B` response or a latched address is pending |
+| `wdata[31:0]` | I | aclk | Register write data; `[ADDR_W:0]` reaches the core |
+| `wvalid`, `wready` | I / O | aclk | Write data handshake, independent of `AW` |
+| `bresp[1:0]` | O | aclk | Always `OKAY` |
+| `bvalid`, `bready` | O / I | aclk | Write response handshake; `bvalid` holds until `bready` |
+| `araddr[31:0]` | I | aclk | `[5:2]` word offset `0..15` |
+| `arvalid`, `arready` | I / O | aclk | Read address handshake; one outstanding read, `arready` low while an `R` response is pending or a config write executes |
+| `rdata[31:0]` | O | aclk | Zero-extended register readback |
+| `rresp[1:0]` | O | aclk | Always `OKAY` |
+| `rvalid`, `rready` | O / I | aclk | Read data handshake; `rvalid` holds until `rready` |
+| `s_axis_aclk` | I | — | FIFO write clock |
+| `s_axis_aresetn` | I | — | Active-low FIFO write-side reset |
+| `s_axis_tvalid`, `s_axis_tdata[DW-1:0]` | I | write | Push request and data |
+| `s_axis_tready` | O | write | `!full`, gated by the synchronized reset release |
+| `m_axis_aclk` | I | — | FIFO read clock |
+| `m_axis_aresetn` | I | — | Active-low FIFO read-side reset |
+| `m_axis_tvalid`, `m_axis_tdata[DW-1:0]` | O | read | Pop result; `tvalid` never waits on `tready` |
+| `m_axis_tready` | I | read | Sink accept; `0` fills the two-entry output pipeline, then applies backpressure to the FIFO |
+| `irq` | O | config | Core IRQ, OR of the masked status bits |
+| `almost_full` | O | write | Core almost-full threshold flag |
+| `almost_empty` | O | read | Core almost-empty threshold flag |
+| `wr_ptr_gray_sync[ADDR_W:0]` | O | read | Write pointer synchronized into the read domain |
+| `rd_ptr_gray_sync[ADDR_W:0]` | O | write | Read pointer synchronized into the write domain |
+
 ## Two-FIFO Chain Simulation
 
 `tb/tb_two_fifo.sv` (`make two-fifo`) instantiates two `async_fifo` DUTs and one
