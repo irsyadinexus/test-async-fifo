@@ -6,8 +6,9 @@
 #   - Asynchronous clock group declaration
 #   - Reset constraints
 #   - Configuration port and status output timing
-#   - Wrapper clock inventories and clock groups (bus-wrapper section at the end;
-#     templates are commented because only one wrapper, if any, is instantiated)
+#   - Wrapper clock inventories and clock groups (bus-wrapper section; templates
+#     are commented because only one wrapper, if any, is instantiated)
+#   - Wrapper reset fan-out and false paths (wrapper resets section)
 
 # ---------------------------------------------------------------------------
 # Write clock — 100 MHz
@@ -90,7 +91,7 @@ set_output_delay -clock rd_clk 2.0 [get_ports almost_empty]
 
 # --- APB wrapper: one clock domain, nothing asynchronous to declare ----------
 # create_clock -name pclk -period 10.000 [get_ports pclk]
-# set_false_path -from [get_ports presetn]
+# Reset: presetn -> see the wrapper resets block below
 # set_input_delay  -clock pclk 2.0 [get_ports {psel penable pwrite paddr pwdata}]
 # set_output_delay -clock pclk 2.0 [get_ports {prdata pready pslverr}]
 # set_output_delay -clock pclk 2.0 [get_ports {irq almost_full almost_empty}]
@@ -104,13 +105,16 @@ set_output_delay -clock rd_clk 2.0 [get_ports almost_empty]
 #
 # MODE is quasi-static: it selects the FIFO clock muxes, so the muxed clocks
 # reach the core's clock pins and must be declared as one asynchronous group.
-# Leave the wr_clk/rd_clk create_clock lines out when the raw side is unused;
-# in MODE 0/3 those pins are ignored and the core runs entirely on hclk.
+# Leave the wr_clk/rd_clk create_clock lines AND their -group clauses out when
+# the raw side is unused; in MODE 0/3 those pins are ignored and the core runs
+# entirely on hclk. A -group that names a clock which was never created is an
+# error in most tools.
 #
 # set_clock_groups -asynchronous -group {hclk} -group {cfg_clk} \
 #   -group {wr_clk} -group {rd_clk}
 #
-# set_false_path -from [get_ports {hresetn cfg_presetn wr_rst_n rd_rst_n}]
+# Reset: hresetn / cfg_presetn / wr_rst_n / rd_rst_n -> see the wrapper resets
+# block below. hresetn resets the AHB engine only, not the FIFO.
 #
 # AHB channel (address phase and data phase both close on hclk):
 # set_input_delay  -clock hclk 2.0 [get_ports {hsel htrans hwrite hsize haddr hwdata hready}]
@@ -149,7 +153,8 @@ set_output_delay -clock rd_clk 2.0 [get_ports almost_empty]
 # create_clock -name m_axis_aclk -period 14.000 [get_ports m_axis_aclk]
 # set_clock_groups -asynchronous \
 #   -group {aclk} -group {s_axis_aclk} -group {m_axis_aclk}
-# set_false_path -from [get_ports {aresetn s_axis_aresetn m_axis_aresetn}]
+# Reset: aresetn / s_axis_aresetn / m_axis_aresetn -> see the wrapper resets
+# block below.
 #
 # AXI4-Lite configuration channel:
 # set_input_delay  -clock aclk 2.0 [get_ports {awaddr awvalid wdata wvalid bready}]
@@ -165,3 +170,43 @@ set_output_delay -clock rd_clk 2.0 [get_ports almost_empty]
 # set_output_delay -clock m_axis_aclk 2.0 [get_ports {m_axis_tvalid m_axis_tdata}]
 # set_input_delay  -clock m_axis_aclk 2.0 [get_ports {m_axis_tready}]
 # set_output_delay -clock m_axis_aclk 2.0 [get_ports {almost_empty wr_ptr_gray_sync}]
+
+# ---------------------------------------------------------------------------
+# Wrapper resets
+# ---------------------------------------------------------------------------
+# Reset fan-out per wrapper (see "Reset" in doc/design.md):
+#   APB        presetn          FIFO write, read, and config domains, plus the
+#                               wrapper's pop state machine
+#   AHB        hresetn          AHB engine only: latched request, read capture,
+#                               and address-phase gating. Does NOT reset the FIFO
+#   AHB        cfg_presetn      core cfg_rst_n and the MODE register
+#   AHB        wr_rst_n         raw write side, driven only in MODE 2
+#   AHB        rd_rst_n         raw read side, driven only in MODE 1
+#   AXI-Stream aresetn          core cfg_rst_n and the AXI4-Lite reset synchronizer
+#   AXI-Stream s_axis_aresetn   FIFO write side and the stream/pipeline reset
+#                               synchronizers of that domain
+#   AXI-Stream m_axis_aresetn   FIFO read side and the stream/pipeline reset
+#                               synchronizers of that domain
+#
+# Every pin asserts asynchronously and is released synchronously in the domain it
+# resets: either a wrapper-local two-stage synchronizer (AXI-Stream config and
+# both stream domains) or the core's internal per-domain synchronizer. No path
+# from these ports has to be timed, so each is a false path. Uncomment the lines
+# for the wrapper you instantiate.
+#
+# APB
+# set_false_path -from [get_ports presetn]
+#
+# AHB
+# set_false_path -from [get_ports hresetn]
+# set_false_path -from [get_ports cfg_presetn]
+# set_false_path -from [get_ports {wr_rst_n rd_rst_n}]
+#
+# AXI-Stream
+# set_false_path -from [get_ports aresetn]
+# set_false_path -from [get_ports {s_axis_aresetn m_axis_aresetn}]
+#
+# Release takes two clocks of the destination domain. A push issued before that
+# completes is accepted by the wrapper (full reads low) and dropped by the core,
+# so the bus master must stay idle for those two clocks. That is a sequencing
+# rule, not a timing constraint; see "Reset" in doc/design.md.
