@@ -24,8 +24,10 @@ Synthesizable SystemVerilog asynchronous FIFO with independent write, read, and 
 
 ## Quick Start
 
-Requirements: Icarus Verilog and/or Verilator. The coverage targets additionally
-need `verilator_coverage` on `PATH` (it ships with Verilator).
+Requirements: Icarus Verilog and/or Verilator. `make sim` and the coverage targets
+additionally need `verilator_coverage` on `PATH`; some Verilator packages (for
+example the conda-forge build) do not install it, in which case the simulation
+passes and only the trailing coverage-report step fails.
 
 ```bash
 make lint            # RTL lint
@@ -35,7 +37,7 @@ make sim             # Verilator simulation + combined coverage data
 make coverage-report # separate line/toggle reports
 ```
 
-Latest verified results (commit `a214688`, 2026-11-24). Functional tests use
+Latest verified results (commit `ff8ada2`, 2026-11-24). Functional tests use
 `DW=8`, `DEPTH=16`, wr 100 MHz / rd 62.5 MHz / cfg 166.7 MHz:
 
 - Functional tests: all passed, 0 errors; 334 writes and 282 reads modeled and checked
@@ -44,12 +46,25 @@ Latest verified results (commit `a214688`, 2026-11-24). Functional tests use
   f1r 9 MHz, f2w 7 MHz, f2r 11 MHz; 100 ctl cycles between bursts): passed,
   0 errors; 512 transfers total (128 writes and 128 reads per FIFO), 256 read
   words compared, ~65 µs of simulated time; waveform in `sim/tb_two_fifo.vcd`
-- Wrapper testbenches (`make iverilog`): APB 36 pushes / 36 pops, AHB 30 writes /
-  29 reads, AXI-Stream 15 words in / 15 out, all 0 errors; APB and AHB wait states
-  measured at 7 cycles each, AXI-Stream `m_axis_tvalid` high in 10/10 cycles
+- Wrapper testbenches (`make iverilog`; APB `pclk` 100 MHz, AHB `hclk` 100 /
+  `cfg_clk` 71.4 / ext `wr_clk` 25 / ext `rd_clk` 38.5 MHz, AXI-Stream `aclk` 83.3 /
+  `s_axis_aclk` 100 / `m_axis_aclk` 71.4 MHz): APB 36 pushes / 36 pops, AHB 30
+  writes / 29 reads, AXI-Stream 15 words in / 15 out, all 0 errors; the APB and AHB
+  stall probes held `PREADY`/`HREADYOUT` low for 7 cycles before the test aborted the
+  transfer, every pop adds exactly one wait state, and AXI-Stream `m_axis_tvalid` was
+  high in 10/10 consecutive cycles with `tready` held high
+- `make lint`: no errors for `async_fifo` and the four wrapper RTL files; the only
+  warnings are `UNUSEDSIGNAL` on intentionally unused bus bits and the core's
+  pre-existing `SYNCASYNCNET`, both tolerated by `-Wno-fatal`
 - Depth modes: 4/4
 - Almost-flag transitions: 4/4
 - Boundary cases: 4/4
+
+The coverage and FORMAL figures below predate the wrappers and were not re-measured
+here: `sim/run_verilator.sh` compiles only `rtl/async_fifo.sv` and
+`tb/tb_async_fifo.sv`, so the wrappers cannot change them, and `verilator_coverage`
+is not installed in this environment.
+
 - Line coverage: 613/616 (99.5%) over RTL + testbench; the only uncovered RTL line is
   the `DEPTH < 4` parameter warning
 - Toggle coverage: 81/81 (100.0%)
@@ -139,6 +154,10 @@ wrappers own the only path that could free space, software must poll IRQ status
 | AHB | `rtl/fifo_ahb_wrapper.sv` | AHB-Lite slave, single data window: write = push, read = pop | separate APB slave | `hclk` for the AHB side, `cfg_clk` for config, `wr_clk`/`rd_clk` for a raw side released by MODE |
 | AXI-Stream | `rtl/fifo_axis_wrapper.sv` | `s_axis` (push) and `m_axis` (pop), independent clocks | AXI4-Lite slave on `aclk` | `s_axis_aclk`, `m_axis_aclk`, `aclk` |
 
+All three wrappers take the core's `DW` and `DEPTH` (with `ADDR_W = $clog2(DEPTH)`)
+and are verified at `DW=8`, `DEPTH=16`. Their bus data ports are fixed at 32 bits;
+making a bus as narrow as `DW` is a port-list edit, not a parameter.
+
 `rtl/fifo_apb_cfg.sv` is the shared, purely combinational APB-to-`cfg_*` bridge: one
 cycle access phase, `PREADY` constant `1`, all 16 word offsets forwarded, and the
 core ignores reserved offsets through its existing `default:` arm.
@@ -214,12 +233,12 @@ tb/tb_two_fifo.sv        Two-FIFO controller-chain simulation
 tb/tb_apb_wrapper.sv     APB wrapper testbench
 tb/tb_ahb_wrapper.sv     AHB wrapper testbench (includes MODE 1/2/3)
 tb/tb_axis_wrapper.sv    AXI-Stream wrapper testbench
-sim/run_iverilog.sh     Icarus runner
-sim/run_verilator.sh    Verilator coverage runner
-sim/sim_main.cpp        Verilator coverage harness
-sim/coverage_report.py  Line/toggle summary
-fpga/constraints.sdc    Example CDC constraints
-doc/design.md           Design and integration details
+sim/run_iverilog.sh      Icarus runner
+sim/run_verilator.sh     Verilator coverage runner
+sim/sim_main.cpp         Verilator coverage harness
+sim/coverage_report.py   Line/toggle summary
+fpga/constraints.sdc     Example CDC constraints
+doc/design.md            Design and integration details
 ```
 
 ## Notes
@@ -227,7 +246,7 @@ doc/design.md           Design and integration details
 - `rd_data` updates on an accepted read clock edge.
 - Status, occupancy, and active-depth readback use synchronized pointers/signals; all are intentionally approximate by synchronizer latency.
 - Apply CDC timing constraints and preserve `ASYNC_REG` chains in implementation.
-- Coverage reporting needs `verilator_coverage` on `PATH` (installed with Verilator).
+- Coverage reporting needs `verilator_coverage` on `PATH`; it is not part of every Verilator package.
 - No license file currently exists; add one before redistribution if required.
 
 ## References
