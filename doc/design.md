@@ -44,7 +44,9 @@ The bus wrappers fan their reset pins out to these domains:
 Each pin asserts asynchronously. Release is synchronous in the domain the pin resets:
 either a wrapper-local two-stage synchronizer (AXI-Stream config and both stream
 domains) or the core's internal synchronizer, or, for pure hclk/cfg_clk wrapper
-flops, the first rising edge after the pin is released.
+flops, the first rising edge after the pin is released. Every one of these pins is
+therefore a false path, and `fpga/constraints.sdc` carries a commented `set_false_path`
+template per wrapper; uncomment the block that matches your design.
 
 A push issued while a reset is still releasing is accepted by the wrapper and dropped
 by the core. The wrapper sees `full` low (both pointers are cleared) and completes the
