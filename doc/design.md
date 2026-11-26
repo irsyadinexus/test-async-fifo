@@ -63,6 +63,34 @@ Releasing one data domain while the other keeps running is invalid for the same
 reason: the pointer pair is no longer consistent, and `empty`/`full` can report
 values that let a wrapper complete transfers the core then drops.
 
+MODE (AHB wrapper, configuration offset 9) is quasi-static because it selects the
+FIFO clock muxes: it may only change while the side whose clock changes is held in
+reset. Sequence a change as follows.
+
+1. Drain the FIFO to empty and idle the AHB bus: no address phase in flight and no
+   latched data phase (a stalled phase is abandoned with `hresetn`; see
+   [Bus Wrappers](#bus-wrappers)).
+2. Assert the data-domain reset(s) listed below. Keep the config domain live —
+   `cfg_presetn` released and `cfg_clk` running.
+3. Write MODE over the APB config port (offset 9). With `cfg_presetn` asserted the
+   MODE register is held at 0 and the write has no effect, so the config domain must
+   already be out of reset.
+4. Release the asserted reset(s), then wait two clocks of each affected domain before
+   the first transfer, exactly as for any other reset release.
+
+| Change | Hold asserted | Reason |
+|---|---|---|
+| 0/3 → 1 | `rd_rst_n` | read side moves from `hclk` to `rd_clk` |
+| 0/3 → 2 | `wr_rst_n` | write side moves from `hclk` to `wr_clk` |
+| 1 → 0/3 | `rd_rst_n` | read side moves from `rd_clk` back to `hclk` |
+| 2 → 0/3 | `wr_rst_n` | write side moves from `wr_clk` back to `hclk` |
+| 1 ↔ 2 | `wr_rst_n` and `rd_rst_n` | both sides change clock |
+| 0 ↔ 3 | none | same effective mode (`3` behaves as `0`) |
+
+A MODE write resets nothing by itself; the resets in step 2 are what make the switch
+safe. Writing MODE with the data clocks running can glitch the core's clock inputs,
+and the core's pointers keep whatever value they had, so the FIFO must be empty.
+
 ## Full and Empty
 
 The read domain declares `empty` when its local read Gray pointer equals the synchronized write Gray pointer.
@@ -220,11 +248,11 @@ reads `0`) selects port ownership:
 | 2 | no (writes are accepted with no effect) | yes | write side on `wr_clk` |
 | 3 | yes (as 0) | yes (as 0) | none |
 
-The clock muxes are plain combinational muxes with no live-switch protection.
-Change MODE only with the affected data-domain reset asserted, the FIFO empty, and
-the AHB bus idle: assert `wr_rst_n` and/or `rd_rst_n`, write MODE over the
-configuration port, then release. The AHB engine's `full`/`empty` usage is safe
-because the side it owns is always the `hclk` side after the mux.
+The clock muxes are plain combinational muxes with no live-switch protection, so
+MODE is quasi-static: it changes only with the affected data-domain reset asserted.
+The ordered sequence and the per-transition reset list are in [Reset](#reset). The AHB
+engine's `full`/`empty` usage is safe because the side it owns is always the `hclk`
+side after the mux.
 
 A data phase that cannot complete (push while `full`, pop while `empty`) stretches
 `HREADYOUT` indefinitely and stalls the whole AHB bus, so poll IRQ status
