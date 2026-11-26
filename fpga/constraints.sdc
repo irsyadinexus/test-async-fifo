@@ -103,15 +103,34 @@ set_output_delay -clock rd_clk 2.0 [get_ports almost_empty]
 # create_clock -name wr_clk  -period 40.000 [get_ports wr_clk]
 # create_clock -name rd_clk  -period 26.000 [get_ports rd_clk]
 #
-# MODE is quasi-static: it selects the FIFO clock muxes, so the muxed clocks
-# reach the core's clock pins and must be declared as one asynchronous group.
-# Leave the wr_clk/rd_clk create_clock lines AND their -group clauses out when
-# the raw side is unused; in MODE 0/3 those pins are ignored and the core runs
-# entirely on hclk. A -group that names a clock which was never created is an
-# error in most tools.
+# MODE (configuration offset 9) is quasi-static: it selects the FIFO clock muxes.
+# The select is a register, so STA cannot prove the mux static and propagates all
+# of its inputs: every raw-side clock that exists reaches the core's clock pins in
+# every mode, and all of them must be created and grouped as asynchronous.
+#
+#   MODE  AHB owns    core wr_clk  core rd_clk  hold on change
+#   0     push + pop  hclk         hclk         none
+#   1     push        hclk         rd_clk       rd_rst_n
+#   2     pop         wr_clk       hclk         wr_rst_n
+#   3     as 0        hclk         hclk         none
+#
+# "hold on change" names the reset of the side that mode moves off hclk. Hold the
+# union of that column for the mode you leave and the mode you enter: 0 <-> 1
+# holds rd_rst_n, 2 <-> 3 holds wr_rst_n, 1 <-> 2 holds both. That is a sequencing
+# rule, not a timing constraint (see "Reset" in doc/design.md).
 #
 # set_clock_groups -asynchronous -group {hclk} -group {cfg_clk} \
 #   -group {wr_clk} -group {rd_clk}
+#
+# If a raw side is not routed at all (its pins tied to hclk/hresetn), omit that
+# clock's create_clock line and its -group clause together; a -group naming a
+# clock that was never created is an error in most tools.
+#
+# Optional: collapse the mux to the configured mode so the unused branch is not
+# analyzed. Re-apply it whenever MODE changes. The command is tool-specific; this
+# is the Vivado form for MODE 0 (both bits zero, so both sides select hclk):
+# set_case_analysis 0 [get_pins -hierarchical *mode_q_reg[1]/Q]
+# set_case_analysis 0 [get_pins -hierarchical *mode_q_reg[0]/Q]
 #
 # Reset: hresetn / cfg_presetn / wr_rst_n / rd_rst_n -> see the wrapper resets
 # block below. hresetn resets the AHB engine only, not the FIFO.
