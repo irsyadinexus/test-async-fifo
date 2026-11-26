@@ -410,9 +410,12 @@ doc/design.md            Design and integration details
   synchronizer; on APB and AHB, keep the master idle for two clock cycles after reset
   release before the first transfer.
 - Coverage reporting needs `verilator_coverage` on `PATH`; it is not part of every Verilator package.
-- No license file currently exists; add one before redistribution if required.
 
 ## References
 
 - C. E. Cummings, “Simulation and Synthesis Techniques for Asynchronous FIFO Design,” SNUG 2002.
 - C. E. Cummings, “Synthesis and Scripting Techniques for Designing Multi-Asynchronous Clock Designs,” SNUG 2002.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
