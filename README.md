@@ -134,7 +134,18 @@ A request dropped by a flush window can also set a sticky bit that no real data 
 
 Change active depth only while the FIFO is empty. Software must ensure the almost-full threshold is sensible for the selected active depth.
 
-Change MODE only while the affected data-domain reset is asserted: assert `wr_rst_n` and/or `rd_rst_n`, write MODE through the AHB wrapper's APB port, then release. The wrapper clock muxes are plain combinational muxes with no live-switch protection, so a mode change with running data clocks is not supported. Switch with the FIFO empty and the AHB bus idle.
+Change MODE only while the affected data-domain reset is asserted. Drain the FIFO, idle the AHB bus, assert the reset(s) below, write MODE through the AHB wrapper's APB port with the config domain live, then release and wait two clocks before the first transfer. The wrapper clock muxes are plain combinational muxes with no live-switch protection, so a mode change with running data clocks is not supported.
+
+| Change | Hold asserted | Reason |
+|---|---|---|
+| `0`/`3` → `1` | `rd_rst_n` | read side moves from `hclk` to `rd_clk` |
+| `0`/`3` → `2` | `wr_rst_n` | write side moves from `hclk` to `wr_clk` |
+| `1` → `0`/`3` | `rd_rst_n` | read side moves from `rd_clk` back to `hclk` |
+| `2` → `0`/`3` | `wr_rst_n` | write side moves from `wr_clk` back to `hclk` |
+| `1` ↔ `2` | `wr_rst_n` and `rd_rst_n` | both sides change clock |
+| `0` ↔ `3` | none | same effective mode (`3` behaves as `0`) |
+
+A MODE write is overridden while `cfg_presetn` is asserted (the register is held at `0`), and the write itself resets nothing: the resets in the table are what make the switch safe.
 
 Configuration values are converted to Gray code in `cfg_clk`, synchronized through two registers, then decoded in the destination domain. See [doc/design.md](doc/design.md) for CDC assumptions and integration constraints.
 
